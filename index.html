@@ -1272,7 +1272,7 @@ function cmdFuel() {
 }
 function cmdComm() {
   head('COMMUNICATIONS');
-  row('RANGE TO EARTH', fmtDist(D.dEarth));
+  row('EARTH RANGE', fmtDist(D.dEarth));
   row('ONE-WAY DELAY', D.lightTime < 1 ? (D.lightTime*1000).toFixed(0)+' ms' : fmtT(D.lightTime));
   row('ROUND TRIP', D.lightTime < 1 ? (D.lightTime*2000).toFixed(0)+' ms' : fmtT(D.lightTime*2));
   const sig = 1e6 / Math.max(D.dEarth, 1)**2 * 1e6;
@@ -1319,8 +1319,13 @@ function quoteBurn(dv, whereLabel, tt, solved) {
     if (secs > impulsive * 1.03)
       say(`Solved by flying the burn: ${(secs - impulsive).toFixed(1)} s longer than the impulsive figure, because the vehicle keeps moving while the engine runs.`, 'dim');
   } else if (solved && solved.dur == null && solved.short) {
-    row('BURN TIME', 'not achievable — propellant runs out first', 'err');
-    say('Burning every drop still falls short of this target. Choose a nearer one.', 'err');
+    if (Math.abs(dv) > dvRemaining()) {
+      row('BURN TIME', 'not achievable — not enough propellant', 'err');
+      say(`This needs ${fmtDV(Math.abs(dv))} and you are carrying ${fmtDV(dvRemaining())}. Choose a nearer target.`, 'err');
+    } else {
+      row('BURN TIME', 'not achievable from this point in the orbit', 'err');
+      say(`Propellant is not the limit — you have ${fmtDV(dvRemaining())} and this needs ${fmtDV(Math.abs(dv))}. A burn reshapes the orbit on the far side, so this target cannot be reached from where you are burning. Try the opposite apsis.`, 'err');
+    }
     return null;
   } else {
     row('BURN TIME', secs.toFixed(1) + ' s at full throttle');
@@ -1575,6 +1580,20 @@ function cmdPlan(A) {
     if (!isFinite(alt)) return say('Usage: PLAN PERI <target periapsis altitude, km>', 'err');
     if (!isFinite(e.ra)) return say('No apoapsis to burn at on an escape trajectory.', 'err');
     const r1 = e.ra, r2 = alt + b.R;
+    if (r2 > r1) {
+      head('MANEUVER · CHANGE PERIAPSIS');
+      row('YOUR APOAPSIS', fmtDist(r1 - b.R));
+      row('TARGET PERI', fmtDist(alt));
+      say('');
+      say('A burn cannot lift the point you are burning at. Firing at apoapsis raises periapsis until it meets apoapsis — that is a circular orbit — and after that the extra thrust goes into raising apoapsis instead. Periapsis can never end up above it.', 'err');
+      say('Propellant is not the limit here. No burn duration reaches this target.', 'dim');
+      say('');
+      say(`  →  PLAN CIRC AP`, 'ok');
+      say(`     circularize where you are, at ${fmtDist(r1 - b.R)}`, 'dim');
+      say(`  →  PLAN APO ${Math.round(alt)}`, 'ok');
+      say('     raise apoapsis to that altitude first, then circularize there', 'dim');
+      return;
+    }
     head('MANEUVER · CHANGE PERIAPSIS');
     row('BURN AT', 'apoapsis, ' + fmtDist(r1 - b.R) + ' alt');
     row('NEW PERIAPSIS', fmtDist(alt));
@@ -1621,7 +1640,7 @@ function cmdPlan(A) {
       row('BURN TIME', sol.dur.toFixed(1) + ' s at full throttle');
       row('IGNITION', `T−${fmtT(sol.tIgn)}`);
       row('ARRIVAL', `${fmtT(sol.arrival.t - S.t)} from now`);
-      row('ARRIVAL PERIAPSIS', fmtDist(sol.arrival.periAlt) + ` over ${tk}`, 'ok');
+      row('ARRIVAL PERI', fmtDist(sol.arrival.periAlt) + ` over ${tk}`, 'ok');
       say('');
       say(`  →  BURN ${sol.mode} ${sol.dur.toFixed(2)} AT T+${sol.tIgn.toFixed(2)}`, 'ok');
       say(`A textbook Hohmann aimed at ${tk}'s orbital radius is a collision course. This solution is flown forward through the sphere-of-influence change, and offset to arrive with a periapsis you can work with.`, 'dim');
@@ -1736,7 +1755,7 @@ function cmdDock() {
   say('');
   row('CAPTURE GATE', 'range < 20 m · closing < 0.30 m/s · lateral < 0.10 m/s');
   const eta = closing > 1e-6 ? range/closing : Infinity;
-  row('TIME TO CONTACT', fmtT(eta));
+  row('CONTACT IN', fmtT(eta));
   say('');
   say('TRANS TGT <m/s>   thrust toward the station', 'out');
   say('TRANS AWAY <m/s>  back off', 'out');
@@ -2023,7 +2042,7 @@ function checkObjectives() {
     row('ELAPSED', fmtMET(S.t));
     row('ΔV EXPENDED', fmtDV(S.ledger.dvUsed));
     row('BURNS', String(S.ledger.burns));
-    row('PROP REMAINING', S.craft.fuel.toFixed(1) + ' kg');
+    row('PROP LEFT', S.craft.fuel.toFixed(1) + ' kg');
     say('');
     const nxt = MISSIONS.find(m => m.id === S.mission.id + 1);
     say(nxt ? `Next up: ${nxt.code} ${nxt.name}.  Type  MIS ${nxt.id}` : 'Every scripted mission is flown. Type MIS 0 for free flight.', 'sys');
