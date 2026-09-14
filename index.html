@@ -1,0 +1,2243 @@
+<title>Delta-V Flight Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+:root{
+  --void:#070A10;
+  --panel:#0E141D;
+  --panel-2:#131B26;
+  --rule:#1E2937;
+  --rule-soft:#161F2B;
+  --amber:#F2A33C;
+  --amber-dim:#9A6A2A;
+  --cyan:#3FA9C9;
+  --cyan-dim:#2B7A94;
+  --cyan-deep:#1C4C5C;
+  --slate:#7C8BA1;
+  --slate-dim:#4A566A;
+  --nominal:#4FD1A5;
+  --caution:#E8C04A;
+  --critical:#E4553C;
+  --ink:#DCE4EE;
+  --f-disp:'Chakra Petch','DIN Alternate','Helvetica Neue',sans-serif;
+  --f-mono:'JetBrains Mono','SF Mono',ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--void);color:var(--ink);
+  font-family:var(--f-mono);font-size:13px;line-height:1.45;
+  -webkit-text-size-adjust:100%;overscroll-behavior:none;
+}
+#app{
+  height:100dvh;display:flex;flex-direction:column;
+  padding:0 max(10px,env(safe-area-inset-left)) 6px max(10px,env(safe-area-inset-right));
+  gap:8px;max-width:1400px;margin:0 auto;width:100%;
+}
+
+/* ---------- status rail ---------- */
+.rail{
+  display:flex;align-items:stretch;gap:0;
+  border-bottom:1px solid var(--rule);
+  padding-block:7px 6px;flex:0 0 auto;
+  font-family:var(--f-disp);
+}
+.rail-cell{display:flex;flex-direction:column;justify-content:center;padding-right:11px;min-width:0;overflow:hidden}
+.rail-cell + .rail-cell{padding-left:11px;border-left:1px solid var(--rule-soft)}
+.rail-k{font-size:8.5px;letter-spacing:.14em;color:var(--slate-dim);text-transform:uppercase;white-space:nowrap}
+.rail-v{font-family:var(--f-mono);font-size:14px;font-weight:700;color:var(--amber);
+  font-variant-numeric:tabular-nums;white-space:nowrap;letter-spacing:-.01em}
+.rail-v.small{font-size:12px}
+.rail-spacer{flex:1 1 auto;min-width:4px}
+.lamp{
+  align-self:center;flex:0 0 auto;max-width:42vw;overflow:hidden;text-overflow:ellipsis;font-family:var(--f-disp);font-size:9px;font-weight:700;
+  letter-spacing:.12em;padding:4px 8px;border:1px solid;border-radius:2px;white-space:nowrap;
+}
+.lamp.ok{color:var(--nominal);border-color:#1E5A48;background:#0B1F1A}
+.lamp.caution{color:var(--caution);border-color:#5C4B15;background:#1F1A08;animation:pulse 1.4s ease-in-out infinite}
+.lamp.crit{color:var(--critical);border-color:#6B2418;background:#1F0D0A;animation:pulse .7s steps(2,end) infinite}
+@media (max-width:600px){
+  .rail-cell{padding-right:7px}
+  .rail-cell + .rail-cell{padding-left:7px}
+  .rail-k{font-size:7.5px;letter-spacing:.1em}
+  .rail-v{font-size:12px}
+  .rail-v.small{font-size:11px}
+  #cell-dv{display:none}
+  .lamp{font-size:8px;padding:3px 6px;letter-spacing:.07em}
+}
+@keyframes pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.lamp{animation:none!important}}
+
+/* ---------- main split ---------- */
+.deck{display:flex;flex-direction:column;gap:8px;flex:1 1 auto;min-height:0}
+@media (min-width:860px){
+  .deck{flex-direction:row}
+  .deck > .col-a{flex:1 1 52%;min-width:0;display:flex;flex-direction:column;gap:8px}
+  .deck > .col-b{flex:1 1 48%;min-width:0;display:flex;flex-direction:column;gap:8px;min-height:0}
+}
+.col-a{display:flex;flex-direction:column;gap:8px;min-height:0;flex:0 0 auto}
+.col-b{display:flex;flex-direction:column;gap:8px;min-height:0;flex:1 1 auto}
+
+/* ---------- plot ---------- */
+.scope{
+  position:relative;background:#060B12;border:1px solid var(--rule);
+  flex:0 0 auto;height:34dvh;min-height:180px;overflow:hidden;
+}
+@media (min-width:860px){.scope{flex:1 1 auto;height:auto;min-height:280px}}
+.scope canvas{display:block;width:100%;height:100%;touch-action:none}
+.scope-tag{
+  position:absolute;top:6px;left:8px;font-family:var(--f-disp);font-size:8.5px;
+  letter-spacing:.16em;color:var(--cyan-deep);text-transform:uppercase;pointer-events:none;
+}
+.scope-scale{
+  position:absolute;bottom:6px;right:8px;font-size:9px;color:var(--slate-dim);
+  font-variant-numeric:tabular-nums;pointer-events:none;
+}
+.scope-zoom{position:absolute;bottom:6px;left:8px;display:flex;gap:4px}
+.zbtn{
+  width:26px;height:26px;background:#0B121B;border:1px solid var(--rule);color:var(--slate);
+  font-family:var(--f-mono);font-size:13px;line-height:1;cursor:pointer;border-radius:2px;padding:0;
+}
+.zbtn:active{background:var(--panel-2);color:var(--amber)}
+
+/* ---------- readout grid ---------- */
+.readout{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--rule-soft);
+  border:1px solid var(--rule);flex:0 0 auto;
+}
+@media (min-width:520px){.readout{grid-template-columns:repeat(6,1fr)}}
+.ro{background:var(--panel);padding:6px 8px 7px;min-width:0}
+.ro-k{font-family:var(--f-disp);font-size:8.5px;letter-spacing:.13em;color:var(--slate-dim);text-transform:uppercase}
+  .ro-v{font-size:13.5px;font-weight:700;color:var(--amber);font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.02em}
+.ro-u{font-size:9px;color:var(--slate-dim);font-weight:400;margin-left:2px}
+.ro.warn .ro-v{color:var(--caution)}
+.ro.bad .ro-v{color:var(--critical)}
+
+/* ---------- scratchpad ---------- */
+.pad{
+  flex:1 1 auto;display:flex;flex-direction:column;min-height:0;
+  background:var(--panel);border:1px solid var(--rule);
+}
+.pad-head{
+  display:flex;align-items:center;gap:8px;padding:5px 9px;border-bottom:1px solid var(--rule-soft);
+  font-family:var(--f-disp);font-size:8.5px;letter-spacing:.16em;color:var(--slate-dim);
+  text-transform:uppercase;flex:0 0 auto;
+}
+.pad-head b{color:var(--cyan);font-weight:600}
+.pad-head .obj{margin-left:auto;color:var(--slate);letter-spacing:.08em}
+.log{
+  flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:8px 9px 10px;
+  -webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+  font-size:12.5px;line-height:1.5;
+}
+.log::-webkit-scrollbar{width:3px}
+.log::-webkit-scrollbar-thumb{background:var(--rule)}
+.ln{white-space:pre-wrap;word-break:break-word;margin:0}
+.ln.cmd{color:var(--cyan);margin-top:7px}
+.ln.cmd::before{content:"› ";color:var(--cyan-deep)}
+.ln.sys{color:var(--slate)}
+.ln.out{color:var(--ink)}
+.ln.key{color:var(--amber)}
+.ln.ok{color:var(--nominal)}
+.ln.warn{color:var(--caution)}
+.ln.err{color:var(--critical)}
+.ln.hd{color:var(--cyan);font-family:var(--f-disp);font-weight:600;letter-spacing:.1em;
+  margin-top:9px;font-size:11px;text-transform:uppercase;
+  border-bottom:1px solid var(--rule);padding-bottom:2px}
+.ln.dim{color:var(--slate-dim)}
+.ln .v{color:var(--amber);font-weight:500}
+
+/* ---------- chips ---------- */
+.chips{
+  display:flex;gap:4px;overflow-x:auto;padding:5px 7px;flex:0 0 auto;
+  border-top:1px solid var(--rule-soft);scrollbar-width:none;
+}
+.chips::-webkit-scrollbar{display:none}
+.chip{
+  flex:0 0 auto;background:#111925;border:1px solid var(--rule);color:var(--slate);
+  font-family:var(--f-disp);font-size:10.5px;font-weight:600;letter-spacing:.09em;
+  padding:5px 9px;border-radius:2px;cursor:pointer;white-space:nowrap;
+}
+.chip:active,.chip:focus-visible{background:#1B2534;color:var(--amber);border-color:var(--amber-dim);outline:none}
+.chip.hot{color:var(--amber);border-color:var(--amber-dim)}
+
+/* ---------- input ---------- */
+.entry{
+  display:flex;align-items:center;gap:0;flex:0 0 auto;
+  border-top:1px solid var(--rule);background:#0A101A;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+.entry .caret{padding:0 7px 0 9px;color:var(--cyan);font-weight:700;flex:0 0 auto}
+#cmd{
+  flex:1 1 auto;min-width:0;background:transparent;border:0;outline:none;color:var(--amber);
+  font-family:var(--f-mono);font-size:16px;font-weight:500;padding:11px 0;letter-spacing:.02em;
+}
+#cmd::placeholder{color:#354054;font-weight:400}
+#go{
+  flex:0 0 auto;background:transparent;border:0;border-left:1px solid var(--rule);
+  color:var(--cyan);font-family:var(--f-disp);font-size:11px;font-weight:700;letter-spacing:.14em;
+  padding:12px 14px;cursor:pointer;
+}
+#go:active{background:var(--panel-2);color:var(--amber)}
+button:focus-visible,input:focus-visible{outline:1px solid var(--amber);outline-offset:-1px}
+
+/* ---------- boot veil ---------- */
+#veil{
+  position:fixed;inset:0;background:var(--void);z-index:30;display:flex;
+  align-items:center;justify-content:center;flex-direction:column;gap:14px;padding:24px;
+}
+#veil h1{font-family:var(--f-disp);font-size:26px;font-weight:700;letter-spacing:.2em;
+  color:var(--amber);margin:0;text-align:center;text-wrap:balance}
+#veil p{color:var(--slate);font-size:12px;margin:0;text-align:center;max-width:34ch}
+#veil button{
+  background:#111925;border:1px solid var(--amber-dim);color:var(--amber);font-family:var(--f-disp);
+  font-size:13px;font-weight:700;letter-spacing:.16em;padding:12px 26px;border-radius:2px;cursor:pointer;
+}
+#veil button:active{background:#1B2534}
+.hidden{display:none!important}
+</style>
+
+<div id="app">
+  <div class="rail" id="rail">
+    <div class="rail-cell"><span class="rail-k">MET</span><span class="rail-v" id="r-met">000:00:00:00</span></div>
+    <div class="rail-cell"><span class="rail-k">Warp</span><span class="rail-v" id="r-warp">1×</span></div>
+    <div class="rail-cell"><span class="rail-k">Ref</span><span class="rail-v small" id="r-soi">EARTH</span></div>
+    <div class="rail-cell" id="cell-dv"><span class="rail-k">ΔV Rem</span><span class="rail-v small" id="r-dv">0</span></div>
+    <div class="rail-spacer"></div>
+    <div class="lamp ok" id="r-lamp">NOMINAL</div>
+  </div>
+
+  <div class="deck">
+    <div class="col-a">
+      <div class="scope">
+        <canvas id="scope"></canvas>
+        <div class="scope-tag" id="scope-tag">ORBITAL PLOT · EARTH</div>
+        <div class="scope-zoom">
+          <button class="zbtn" id="z-out" aria-label="Zoom out">−</button>
+          <button class="zbtn" id="z-in" aria-label="Zoom in">+</button>
+          <button class="zbtn" id="z-fit" aria-label="Fit view">⊡</button>
+        </div>
+        <div class="scope-scale" id="scope-scale">—</div>
+      </div>
+      <div class="readout" id="readout">
+        <div class="ro"><div class="ro-k">Altitude</div><div class="ro-v" id="d-alt">—</div></div>
+        <div class="ro"><div class="ro-k">Velocity</div><div class="ro-v" id="d-vel">—</div></div>
+        <div class="ro"><div class="ro-k" id="k-apo">Apoapsis</div><div class="ro-v" id="d-apo">—</div></div>
+        <div class="ro"><div class="ro-k" id="k-per">Periapsis</div><div class="ro-v" id="d-per">—</div></div>
+        <div class="ro"><div class="ro-k">Eccentricity</div><div class="ro-v" id="d-ecc">—</div></div>
+        <div class="ro"><div class="ro-k">Period</div><div class="ro-v" id="d-prd">—</div></div>
+      </div>
+    </div>
+
+    <div class="col-b">
+      <div class="pad">
+        <div class="pad-head"><b id="p-mis">NO MISSION</b><span class="obj" id="p-obj"></span></div>
+        <div class="log" id="log"></div>
+        <div class="chips" id="chips"></div>
+        <form class="entry" id="entry" autocomplete="off">
+          <span class="caret">›</span>
+          <input id="cmd" name="cmd" type="text" placeholder="type a command — HELP" autocomplete="off"
+                 autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="send">
+          <button id="go" type="submit">EXEC</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="veil">
+  <h1>DELTA-V</h1>
+  <p>Flight console for orbital operations. Real two-body mechanics — your burns move apoapsis and periapsis the way they actually would.</p>
+  <button id="boot" type="button">POWER ON</button>
+</div>
+
+<script>
+"use strict";
+/* ============================================================
+   DELTA-V — orbital flight console
+   Planar patched-conic simulation. Units: km, km/s, s, kg.
+   ============================================================ */
+
+const G0 = 9.80665;            // m/s^2
+const TAU = Math.PI * 2;
+const AU = 149597870.7;        // km
+
+/* ---- celestial bodies -------------------------------------
+   `a` / `period` describe a circular orbit about `parent`.
+   `soi` is the sphere-of-influence radius used for conic patching. */
+const BODIES = {
+  SUN:   { name:'SUN',   mu:1.32712440018e11, R:696340, parent:null,   color:'#F2A33C', soi:Infinity },
+  EARTH: { name:'EARTH', mu:398600.4418, R:6371,   parent:'SUN',   a:AU,          period:3.15581e7, phase0:1.10, soi:924000,  color:'#3FA9C9', atmo:140 },
+  MOON:  { name:'MOON',  mu:4902.800,    R:1737.4, parent:'EARTH', a:384400,      period:2.360591e6, phase0:0.40, soi:66100,  color:'#8A93A3' },
+  VENUS: { name:'VENUS', mu:324858.6,    R:6051.8, parent:'SUN',   a:0.72333*AU,  period:1.94141e7, phase0:4.10, soi:616000,  color:'#D8B26A', atmo:250 },
+  MARS:  { name:'MARS',  mu:42828.37,    R:3389.5, parent:'SUN',   a:1.52366*AU,  period:5.93554e7, phase0:4.6407, soi:577000,  color:'#C2603F', atmo:110 },
+};
+const CHILDREN = {};
+for (const k in BODIES) {
+  const p = BODIES[k].parent;
+  if (p) (CHILDREN[p] = CHILDREN[p] || []).push(k);
+  else CHILDREN[k] = CHILDREN[k] || [];
+}
+
+/* ---- small vector helpers --------------------------------- */
+const V = {
+  add:(a,b)=>({x:a.x+b.x, y:a.y+b.y}),
+  sub:(a,b)=>({x:a.x-b.x, y:a.y-b.y}),
+  mul:(a,s)=>({x:a.x*s, y:a.y*s}),
+  dot:(a,b)=>a.x*b.x + a.y*b.y,
+  crs:(a,b)=>a.x*b.y - a.y*b.x,
+  len:a=>Math.hypot(a.x,a.y),
+  unit:a=>{const m=Math.hypot(a.x,a.y); return m<1e-12?{x:0,y:0}:{x:a.x/m,y:a.y/m};},
+  rot:(a,t)=>({x:a.x*Math.cos(t)-a.y*Math.sin(t), y:a.x*Math.sin(t)+a.y*Math.cos(t)}),
+};
+
+/* ---- body ephemeris (circular, coplanar) ------------------- */
+function bodyStateInParent(key, t) {
+  const b = BODIES[key];
+  if (!b.parent) return { r:{x:0,y:0}, v:{x:0,y:0} };
+  const th = b.phase0 + TAU * t / b.period;
+  const sp = TAU * b.a / b.period;
+  return { r:{x:b.a*Math.cos(th), y:b.a*Math.sin(th)},
+           v:{x:-sp*Math.sin(th),  y: sp*Math.cos(th)} };
+}
+/** State of `key` expressed in the frame centred on `frame`. */
+function absState(k, t) {
+  let r = {x:0,y:0}, v = {x:0,y:0}, c = k;
+  while (BODIES[c].parent) {
+    const s = bodyStateInParent(c, t);
+    r = V.add(r, s.r); v = V.add(v, s.v);
+    c = BODIES[c].parent;
+  }
+  return { r, v };
+}
+function bodyStateIn(frame, key, t) {
+  if (frame === key) return { r:{x:0,y:0}, v:{x:0,y:0} };
+  const A = absState(key, t), B = absState(frame, t);
+  return { r:V.sub(A.r, B.r), v:V.sub(A.v, B.v) };
+}
+
+/* ---- Stumpff functions ------------------------------------- */
+function stumpffC(z){
+  if (z > 1e-8)  { const s=Math.sqrt(z);  return (1-Math.cos(s))/z; }
+  if (z < -1e-8) { const s=Math.sqrt(-z); return (Math.cosh(s)-1)/(-z); }
+  return 0.5 - z/24 + z*z/720;
+}
+function stumpffS(z){
+  if (z > 1e-8)  { const s=Math.sqrt(z);  return (s-Math.sin(s))/(s*s*s); }
+  if (z < -1e-8) { const s=Math.sqrt(-z); return (Math.sinh(s)-s)/(s*s*s); }
+  return 1/6 - z/120 + z*z/5040;
+}
+
+/* ---- universal-variable two-body propagation ---------------
+   Exact for ellipse, parabola and hyperbola alike, which is what
+   lets time warp jump hours in a single step without drift.     */
+function propagate(r0v, v0v, mu, dt) {
+  if (dt === 0) return { r:{...r0v}, v:{...v0v} };
+  const r0 = V.len(r0v), v0 = V.len(v0v);
+  const vr0 = V.dot(r0v, v0v) / r0;
+  const alpha = 2/r0 - v0*v0/mu;           // 1/a
+  const sq = Math.sqrt(mu);
+
+  let x;
+  if (alpha > 1e-10) {                      // ellipse
+    x = sq * dt * alpha;
+  } else if (alpha < -1e-10) {              // hyperbola
+    const a = 1/alpha;
+    x = Math.sign(dt) * Math.sqrt(-a) * Math.log(
+      (-2*mu*alpha*dt) /
+      (V.dot(r0v,v0v) + Math.sign(dt)*Math.sqrt(-mu*a)*(1 - r0*alpha)) );
+    if (!isFinite(x)) x = Math.sign(dt) * Math.sqrt(-a);
+  } else {                                  // near-parabolic
+    x = sq * dt / r0;
+  }
+
+  for (let i = 0; i < 80; i++) {
+    const z = alpha*x*x, C = stumpffC(z), S = stumpffS(z);
+    const F  = r0*vr0/sq*x*x*C + (1-alpha*r0)*x*x*x*S + r0*x - sq*dt;
+    const dF = r0*vr0/sq*x*(1 - alpha*x*x*S) + (1-alpha*r0)*x*x*C + r0;
+    if (Math.abs(dF) < 1e-14) break;
+    const d = F/dF;
+    x -= d;
+    if (Math.abs(d) < 1e-9) break;
+  }
+
+  const z = alpha*x*x, C = stumpffC(z), S = stumpffS(z);
+  const f = 1 - x*x/r0*C;
+  const g = dt - x*x*x/sq*S;
+  const R = V.add(V.mul(r0v,f), V.mul(v0v,g));
+  const rm = V.len(R);
+  const fd = sq/(rm*r0) * (alpha*x*x*x*S - x);
+  const gd = 1 - x*x/rm*C;
+  const Vv = V.add(V.mul(r0v,fd), V.mul(v0v,gd));
+  if (!isFinite(R.x)||!isFinite(R.y)||!isFinite(Vv.x)||!isFinite(Vv.y))
+    return { r:{...r0v}, v:{...v0v} };
+  return { r:R, v:Vv };
+}
+
+/* ---- orbital elements from a state vector ------------------ */
+function elements(r0v, v0v, mu) {
+  const r = V.len(r0v), v = V.len(v0v);
+  const h = V.crs(r0v, v0v);                       // scalar in-plane
+  const en = v*v/2 - mu/r;
+  const a  = Math.abs(en) < 1e-12 ? Infinity : -mu/(2*en);
+  const evx = ((v*v - mu/r)*r0v.x - V.dot(r0v,v0v)*v0v.x)/mu;
+  const evy = ((v*v - mu/r)*r0v.y - V.dot(r0v,v0v)*v0v.y)/mu;
+  const e  = Math.hypot(evx, evy);
+  const argp = Math.atan2(evy, evx);
+  const dir = h >= 0 ? 1 : -1;
+  // true anomaly: angle from the eccentricity vector to r, measured along motion
+  const nu = normAngle(dir * (Math.atan2(r0v.y, r0v.x) - argp));
+  const p  = h*h/mu;
+  const rp = (e < 1) || a < 0 ? a*(1-e) : p/(1+e);
+  const ra = e < 1 ? a*(1+e) : Infinity;
+  const period = e < 1 && a > 0 ? TAU*Math.sqrt(a*a*a/mu) : Infinity;
+  return { r, v, h, a, e, argp, dir, nu, rp, ra, period, energy:en, p,
+           vr: V.dot(r0v,v0v)/r };
+}
+function normAngle(x){ x %= TAU; return x < 0 ? x + TAU : x; }
+
+/* ---- time until next periapsis / apoapsis ------------------ */
+function timeToAnomaly(el, mu, targetNu) {
+  if (!(el.e < 1) || !(el.a > 0)) return Infinity;
+  const M = (nu) => {
+    const E = 2*Math.atan2(Math.sqrt(1-el.e)*Math.sin(nu/2), Math.sqrt(1+el.e)*Math.cos(nu/2));
+    return E - el.e*Math.sin(E);
+  };
+  const n = Math.sqrt(mu/(el.a*el.a*el.a));
+  let dM = normAngle(M(targetNu) - M(el.nu));
+  return dM / n;
+}
+/**
+ * Time to the next periapsis. Handles hyperbolic arcs too — which is the whole
+ * point, because every interplanetary arrival is hyperbolic and the capture
+ * burn has to be scheduled at its periapsis.
+ */
+function tToPeri(el, mu) {
+  if (el.e < 1 && el.a > 0) return timeToAnomaly(el, mu, 0);
+  if (el.e > 1) {
+    let nu = el.nu > Math.PI ? el.nu - TAU : el.nu;      // signed, -π..π
+    const k = Math.sqrt((el.e - 1)/(el.e + 1)) * Math.tan(nu/2);
+    if (Math.abs(k) >= 1) return Infinity;               // beyond the asymptote
+    const H = 2 * Math.atanh(k);
+    const M = el.e * Math.sinh(H) - H;
+    const n = Math.sqrt(mu / Math.pow(-el.a, 3));
+    const dt = -M / n;                                   // M < 0 inbound
+    return dt > 1e-9 ? dt : Infinity;
+  }
+  return Infinity;
+}
+const tToApo = (el,mu) => timeToAnomaly(el, mu, Math.PI);
+
+/* ---- circular / escape speeds ------------------------------ */
+const vCirc = (mu,r) => Math.sqrt(mu/r);
+const vAtR  = (mu,r,a) => Math.sqrt(Math.max(0, mu*(2/r - 1/a)));
+</script>
+
+<script>
+/* ============================================================
+   VEHICLE STATE + SUBSYSTEMS
+   ============================================================ */
+const S = {
+  t: 0, soi: 'EARTH', r:{x:0,y:0}, v:{x:0,y:0},
+  warp: 1, paused: true,
+  att: 'PRO', burn: null, sched: null,
+  target: null, objects: [],
+  mission: null, objectives: [], status: 'idle',
+  craft: { name:'—', dry:2200, fuel:0, fuelMax:0, thrust:0, isp:311,
+           rcs:0, rcsMax:0, rcsIsp:220, crew:0 },
+  power: { batt:100, battMax:100, area:14, eff:0.29, load:340, gen:0, ecl:false },
+  therm: { hull:20 },
+  loads: { HEAT:true, SCI:false, COMM:true },
+  ledger: { dvUsed:0, burns:0 },
+  flags: { lunarSOI:false, perihelionPassed:false },
+  landingAllowed: false, thermLimit: 800, completed: false, pauseAfterBurn: false,
+};
+
+const craftMass = () => S.craft.dry + S.craft.fuel + S.craft.rcs;
+const dvRemaining = () => {
+  const m0 = craftMass(), m1 = m0 - S.craft.fuel;
+  return m1 <= 0 ? 0 : S.craft.isp * G0 * Math.log(m0/m1);   // m/s
+};
+const soiBody = () => BODIES[S.soi];
+const el = () => elements(S.r, S.v, soiBody().mu);
+
+/* ---- derived telemetry, recomputed each frame -------------- */
+let D = {};
+function derive() {
+  const b = soiBody(), e = el();
+  const alt = e.r - b.R;
+  const sunR = absState(S.soi, S.t).r;                    // body position w.r.t. Sun
+  const craftSun = V.add(sunR, S.r);
+  const dSun = Math.max(1, V.len(craftSun));
+  const flux = 1361 * (AU/dSun)**2;                       // W/m^2
+
+  // eclipse: craft on the far side of its primary from the Sun, inside the shadow cylinder
+  let ecl = false;
+  if (S.soi !== 'SUN') {
+    const toSun = V.unit(V.mul(sunR, -1));                // body -> Sun
+    const along = V.dot(S.r, toSun);
+    const perp  = Math.abs(V.crs(S.r, toSun));
+    ecl = along < 0 && perp < b.R;
+  }
+  const gen = ecl ? 0 : flux * S.power.area * S.power.eff;
+  let load = 120;                                          // avionics floor
+  if (S.loads.HEAT) load += 140;
+  if (S.loads.COMM) load += 80;
+  if (S.loads.SCI)  load += 210;
+  if (S.burn) load += 60;
+  S.power.gen = gen; S.power.load = load;
+
+  const earth = absState('EARTH', S.t).r;
+  const dEarth = V.len(V.sub(V.add(sunR, S.r), earth));
+  return D = {
+    e, b, alt, dSun, flux, ecl, gen, load,
+    dEarth, lightTime: dEarth / 299792.458,
+    apoAlt: e.ra === Infinity ? Infinity : e.ra - b.R,
+    perAlt: e.rp - b.R,
+    tPeri: tToPeri(e, b.mu), tApo: tToApo(e, b.mu),
+    dv: dvRemaining(),
+    escape: e.e >= 1,
+  };
+}
+
+/* ---- power / thermal integration --------------------------- */
+function stepSystems(dt) {
+  const net = (S.power.gen - S.power.load) * dt / 3600;   // Wh
+  S.power.batt = Math.max(0, Math.min(S.power.battMax, S.power.batt + net));
+  // radiative equilibrium, relaxed
+  const eq = Math.pow(Math.max(D.flux,1) * 0.28 / (4 * 5.670374e-8 * 0.85), 0.25) - 273.15;
+  const k = 1 - Math.exp(-dt / 5400);
+  S.therm.hull += (eq - S.therm.hull) * k;
+}
+
+/* ---- thrust ------------------------------------------------ */
+function thrustDir(mode) {
+  const vhat = V.unit(S.v), rhat = V.unit(S.r);
+  switch (mode) {
+    case 'PRO':  return vhat;
+    case 'RET':  return V.mul(vhat, -1);
+    case 'ROUT': return rhat;
+    case 'RIN':  return V.mul(rhat, -1);
+    default:     return vhat;
+  }
+}
+
+/** Numerically integrate one substep while the main engine is lit. */
+function burnStep(dt) {
+  const b = soiBody(), mu = b.mu;
+  const m = craftMass();
+  const dirv = thrustDir(S.burn.dir);
+  const aT = S.craft.fuel > 0 ? S.craft.thrust / m : 0;   // km/s^2
+  const acc = (rv) => {
+    const rr = V.len(rv);
+    return V.add(V.mul(rv, -mu/(rr*rr*rr)), V.mul(dirv, aT));
+  };
+  // RK4 on position/velocity
+  const r0 = S.r, v0 = S.v;
+  const k1r = v0,                       k1v = acc(r0);
+  const k2r = V.add(v0, V.mul(k1v,dt/2)), k2v = acc(V.add(r0, V.mul(k1r,dt/2)));
+  const k3r = V.add(v0, V.mul(k2v,dt/2)), k3v = acc(V.add(r0, V.mul(k2r,dt/2)));
+  const k4r = V.add(v0, V.mul(k3v,dt)),   k4v = acc(V.add(r0, V.mul(k3r,dt)));
+  S.r = V.add(r0, V.mul(V.add(V.add(k1r, V.mul(k2r,2)), V.add(V.mul(k3r,2), k4r)), dt/6));
+  S.v = V.add(v0, V.mul(V.add(V.add(k1v, V.mul(k2v,2)), V.add(V.mul(k3v,2), k4v)), dt/6));
+
+  if (S.craft.fuel > 0) {
+    const mdot = S.craft.thrust * 1000 / (S.craft.isp * G0);   // kg/s
+    const used = Math.min(S.craft.fuel, mdot * dt);
+    S.craft.fuel -= used;
+    S.ledger.dvUsed += aT * 1000 * dt;
+    if (S.craft.fuel <= 0) {
+      S.craft.fuel = 0;
+      endBurn('MAIN ENGINE CUTOFF — propellant exhausted', 'warn');
+    }
+  }
+  if (!S.burn) return;              // cutoff above already cleared the burn
+  S.burn.left -= dt;
+  if (S.burn && S.burn.left <= 1e-9) endBurn('MECO — burn complete', 'ok');
+}
+
+function endBurn(msg, cls) {
+  if (!S.burn) return;
+  const spent = S.burn.total - Math.max(0, S.burn.left);
+  S.burn = null;
+  S.ledger.burns++;
+  say(msg + ` · ${spent.toFixed(1)} s`, cls || 'ok');
+  if (S.warp !== S.preBurnWarp && S.preBurnWarp) { S.warp = S.preBurnWarp; S.preBurnWarp = null; }
+  if (S.pauseAfterBurn) { S.warp = 0; S.pauseAfterBurn = false; say('Clock held. Type MIS for the roster.', 'sys'); }
+}
+
+/* ---- sphere-of-influence patching -------------------------- */
+function patchSOI() {
+  const b = soiBody();
+  // escape upward
+  if (b.parent && V.len(S.r) > b.soi) {
+    const st = bodyStateInParent(S.soi, S.t);
+    S.r = V.add(S.r, st.r); S.v = V.add(S.v, st.v);
+    S.soi = b.parent;
+    say(`SOI TRANSITION · now referenced to ${S.soi}`, 'key');
+    fitView(); return true;
+  }
+  // capture downward
+  for (const c of (CHILDREN[S.soi] || [])) {
+    const st = bodyStateInParent(c, S.t);
+    const rel = V.sub(S.r, st.r);
+    if (V.len(rel) < BODIES[c].soi) {
+      S.r = rel; S.v = V.sub(S.v, st.v);
+      S.soi = c;
+      say(`SOI TRANSITION · now referenced to ${c}`, 'key');
+      fitView(); return true;
+    }
+  }
+  return false;
+}
+
+/* ---- the clock --------------------------------------------- */
+function advance(dtSim) {
+  if (S.status !== 'flight') return;
+  let left = dtSim, guard = 0;
+  while (left > 1e-9 && guard++ < 220) {
+    let dt;
+    if (S.burn) {
+      dt = Math.min(left, 0.5, S.burn.left);
+    } else {
+      const e = el(), b = soiBody();
+      // Move at most ~2% of the current radius per chunk. Bounding by a fraction
+      // of the period instead would sample a fast perihelion pass far too coarsely.
+      let cap = Math.max(0.5, 0.02 * e.r / Math.max(e.v, 1e-6));
+      if (e.r - b.R < 200) cap = Math.min(cap, 5);
+      // Tighten the step as a sphere-of-influence boundary approaches. Without
+      // this, a coarse step at high warp carries the vehicle thousands of km
+      // INSIDE a moon's SOI while still being propagated as if that moon were
+      // not there — the trajectory that comes out is simply wrong.
+      for (const c of (CHILDREN[S.soi] || [])) {
+        const st = bodyStateInParent(c, S.t);
+        const rel = V.sub(S.r, st.r), relv = V.sub(S.v, st.v);
+        const d = V.len(rel);
+        if (d <= BODIES[c].soi) continue;
+        const closing = -V.dot(V.unit(rel), relv);
+        if (closing > 1e-9) cap = Math.min(cap, Math.max(1, (d - BODIES[c].soi) * 0.4 / closing));
+      }
+      if (b.parent && isFinite(b.soi)) {
+        const out = b.soi - e.r, rate = e.vr;
+        if (rate > 1e-9 && out > 0) cap = Math.min(cap, Math.max(1, out * 0.4 / rate));
+      }
+      // never step past an armed burn's ignition point, however fast the clock runs
+      const ti = timeToIgnition();
+      if (isFinite(ti) && ti > 0) cap = Math.min(cap, Math.max(0.25, ti));
+      dt = Math.min(left, cap);
+    }
+    if (S.burn) burnStep(dt); else {
+      const b = soiBody();
+      const out = propagate(S.r, S.v, b.mu, dt);
+      S.r = out.r; S.v = out.v;
+    }
+    S.t += dt; left -= dt;
+    for (const o of S.objects) stepObject(o, dt);
+    derive();
+    stepSystems(dt);
+    if (patchSOI()) { derive(); }
+    if (checkHazards()) return;
+    fireSchedule();
+    if (S.status !== 'flight') return;
+  }
+  checkObjectives();
+}
+
+function stepObject(o, dt) {
+  const out = propagate(o.r, o.v, BODIES[o.soi].mu, dt);
+  o.r = out.r; o.v = out.v;
+}
+
+/* ---- hazards ----------------------------------------------- */
+function checkHazards() {
+  const b = soiBody(), rr = V.len(S.r), alt = rr - b.R;
+  if (S.power.batt <= 0 && S.power.gen < S.power.load) {
+    if (!S.warnedPower) { S.warnedPower = true; say('CAUTION · BUS UNDERVOLT — battery depleted, shed load (PWR)', 'err'); }
+  } else S.warnedPower = false;
+
+  const tl = S.thermLimit || 800;
+  if (S.therm.hull > tl*0.8 && !S.warnedTherm) { S.warnedTherm = true; say(`CAUTION · HULL ${S.therm.hull.toFixed(0)} °C — limit is ${tl} °C`, 'warn'); }
+  if (S.therm.hull > tl) return loseMission(`VEHICLE LOST — thermal failure. Hull exceeded ${tl} °C.`);
+
+  if (alt <= 0) {
+    const vv = Math.abs(V.dot(S.v, V.unit(S.r))) * 1000;      // m/s vertical
+    const hv = Math.abs(V.crs(V.unit(S.r), S.v)) * 1000;      // m/s horizontal
+    if (S.landingAllowed && vv < 4 && hv < 3) {
+      S.status = 'landed'; S.v = {x:0,y:0};
+      S.r = V.mul(V.unit(S.r), b.R);
+      say(`TOUCHDOWN on ${b.name} · ${vv.toFixed(2)} m/s vertical, ${hv.toFixed(2)} m/s lateral`, 'ok');
+      checkObjectives(true); return true;
+    }
+    return loseMission(`VEHICLE LOST — surface impact on ${b.name} at ${Math.hypot(vv,hv).toFixed(0)} m/s.`);
+  }
+  if (b.atmo && alt < b.atmo * 0.5 && !S.landingAllowed) {
+    if (!S.warnedAtmo) { S.warnedAtmo = true; say(`CAUTION · ATMOSPHERIC INTERFACE — ${alt.toFixed(0)} km, raise periapsis`, 'warn'); }
+  }
+  return false;
+}
+
+function loseMission(msg) {
+  S.status = 'lost'; S.warp = 0; S.burn = null; S.sched = null;
+  say(msg, 'err');
+  say('Type  MIS  to pick a mission, or  RESTART  to fly this one again.', 'sys');
+  return true;
+}
+
+/* ---- scheduled burns --------------------------------------- */
+/** Seconds until an armed burn should light, or Infinity if none. */
+function timeToIgnition() {
+  if (!S.sched || S.burn) return Infinity;
+  const b = soiBody(), e = el();
+  let tt;
+  if (S.sched.at === 'PE') tt = tToPeri(e, b.mu);
+  else if (S.sched.at === 'AP') tt = tToApo(e, b.mu);
+  else if (S.sched.at === 'XFER') {
+    const w = transferWindow(S.sched.body);
+    tt = w ? w.wait : Infinity;
+  }
+  else tt = S.sched.when - S.t;
+  return tt - S.sched.dur/2;
+}
+
+function fireSchedule() {
+  if (!S.sched || S.burn) return;
+  const b = soiBody(), e = el();
+  const ti = timeToIgnition();
+  if (ti <= 0.5) {
+    const sc = S.sched; S.sched = null;
+    startBurn(sc.dir, sc.dur, true);
+  }
+}
+</script>
+
+<script>
+/* ============================================================
+   SCOPE — orbital plot
+   ============================================================ */
+const cv = document.getElementById('scope');
+const cx2 = cv.getContext('2d');
+const view = { km:80, auto:true };      // km per CSS pixel
+let W = 300, H = 200, DPR = 1;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2.5);
+  const b = cv.parentElement.getBoundingClientRect();
+  W = Math.max(1, b.width); H = Math.max(1, b.height);
+  cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR);
+  cx2.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', () => { resize(); if (view.auto) fitView(); });
+
+function fitView() {
+  const b = soiBody(), e = el();
+  let extent = b.R * 3;
+  if (isFinite(e.ra)) extent = Math.max(extent, e.ra * 1.12);
+  else extent = Math.max(extent, e.r * 1.6);
+  if (S.soi !== 'SUN' && CHILDREN[S.soi]) {
+    for (const c of CHILDREN[S.soi]) if (e.ra > BODIES[c].a * 0.6) extent = Math.max(extent, BODIES[c].a*1.15);
+  }
+  if (b.parent) extent = Math.min(extent, b.soi * 1.1);
+  view.km = extent / (Math.min(W,H) * 0.44);
+  view.auto = true;
+}
+const PX = (kmv) => kmv / view.km;
+
+/* proximity target (station or body) resolved to this frame */
+function targetRel() {
+  if (!S.target) return null;
+  if (S.target === 'STATION') {
+    const o = S.objects.find(o => o.id === 'STATION');
+    if (!o || o.soi !== S.soi) return null;
+    return { r:V.sub(o.r, S.r), v:V.sub(o.v, S.v), name:'STATION', obj:o };
+  }
+  if (BODIES[S.target]) {
+    const st = bodyStateIn(S.soi, S.target, S.t);
+    return { r:V.sub(st.r, S.r), v:V.sub(st.v, S.v), name:S.target, body:BODIES[S.target] };
+  }
+  return null;
+}
+
+function conicPath(e, mu, maxR) {
+  const pts = [];
+  if (e.e < 1) {
+    for (let i = 0; i <= 180; i++) {
+      const nu = i/180*TAU;
+      const rr = e.p/(1 + e.e*Math.cos(nu));
+      const th = e.argp + e.dir*nu;
+      pts.push({ x:rr*Math.cos(th), y:rr*Math.sin(th) });
+    }
+  } else {
+    const nuMax = Math.acos(-1/e.e) * 0.995;
+    for (let i = 0; i <= 160; i++) {
+      const nu = -nuMax + (i/160)*2*nuMax;
+      const rr = e.p/(1 + e.e*Math.cos(nu));
+      if (rr > maxR) continue;
+      const th = e.argp + e.dir*nu;
+      pts.push({ x:rr*Math.cos(th), y:rr*Math.sin(th) });
+    }
+  }
+  return pts;
+}
+
+function stroke(pts, color, dash, width) {
+  if (pts.length < 2) return;
+  cx2.save();
+  cx2.setLineDash(dash || []);
+  cx2.strokeStyle = color; cx2.lineWidth = width || 1;
+  cx2.beginPath();
+  pts.forEach((p,i) => { const X = W/2 + PX(p.x), Y = H/2 - PX(p.y);
+    i ? cx2.lineTo(X,Y) : cx2.moveTo(X,Y); });
+  cx2.stroke(); cx2.restore();
+}
+function disc(p, rpx, fill, stroked) {
+  cx2.beginPath();
+  cx2.arc(W/2 + PX(p.x), H/2 - PX(p.y), Math.max(rpx, 0.5), 0, TAU);
+  if (fill) { cx2.fillStyle = fill; cx2.fill(); }
+  if (stroked) { cx2.strokeStyle = stroked; cx2.lineWidth = 1; cx2.stroke(); }
+}
+function tag(p, text, color, dy) {
+  cx2.save();
+  cx2.font = '600 9px "Chakra Petch", sans-serif';
+  cx2.fillStyle = color; cx2.textAlign = 'center';
+  cx2.fillText(text, W/2 + PX(p.x), H/2 - PX(p.y) + (dy || -7));
+  cx2.restore();
+}
+
+let proxMode = false;
+function draw() {
+  if (!W) return;
+  cx2.clearRect(0,0,W,H);
+  cx2.fillStyle = '#060B12'; cx2.fillRect(0,0,W,H);
+  const b = soiBody(), e = D.e || el();
+  const tgt = targetRel();
+  proxMode = !!(tgt && V.len(tgt.r) < 30 && S.target === 'STATION');
+
+  if (proxMode) { drawProximity(tgt); return; }
+
+  // range rings
+  cx2.save(); cx2.strokeStyle = '#111C28'; cx2.lineWidth = 1;
+  const ringStep = niceStep(view.km * Math.min(W,H) * 0.18);
+  for (let k = 1; k <= 8; k++) {
+    const rr = PX(ringStep*k);
+    if (rr > Math.hypot(W,H)) break;
+    cx2.beginPath(); cx2.arc(W/2, H/2, rr, 0, TAU); cx2.stroke();
+  }
+  cx2.restore();
+
+  // sphere of influence
+  if (b.parent && isFinite(b.soi)) {
+    cx2.save(); cx2.setLineDash([2,5]); cx2.strokeStyle = '#17323C'; cx2.lineWidth = 1;
+    cx2.beginPath(); cx2.arc(W/2, H/2, PX(b.soi), 0, TAU); cx2.stroke(); cx2.restore();
+  }
+
+  // satellites of the current primary
+  for (const c of (CHILDREN[S.soi] || [])) {
+    const cb = BODIES[c], st = bodyStateInParent(c, S.t);
+    if (PX(cb.a) < Math.hypot(W,H)) {
+      cx2.save(); cx2.setLineDash([1,4]); cx2.strokeStyle = '#1B2B38'; cx2.lineWidth = 1;
+      cx2.beginPath(); cx2.arc(W/2, H/2, PX(cb.a), 0, TAU); cx2.stroke(); cx2.restore();
+    }
+    const rp = PX(cb.R);
+    disc(st.r, Math.max(rp, 2), cb.color + '55', cb.color);
+    if (isFinite(cb.soi)) {
+      cx2.save(); cx2.setLineDash([2,4]); cx2.strokeStyle = '#1B3A44';
+      cx2.beginPath(); cx2.arc(W/2+PX(st.r.x), H/2-PX(st.r.y), PX(cb.soi), 0, TAU); cx2.stroke(); cx2.restore();
+    }
+    if (Math.abs(PX(st.r.x)) < W && Math.abs(PX(st.r.y)) < H) tag(st.r, c, '#4A566A', -Math.max(rp,2)-4);
+  }
+
+  // primary
+  const bp = Math.max(PX(b.R), 2.5);
+  const g = cx2.createRadialGradient(W/2,H/2,0, W/2,H/2,bp);
+  g.addColorStop(0, b.color + '30'); g.addColorStop(1, b.color + '10');
+  cx2.beginPath(); cx2.arc(W/2,H/2,bp,0,TAU); cx2.fillStyle = g; cx2.fill();
+  cx2.strokeStyle = b.color + 'AA'; cx2.lineWidth = 1.2; cx2.stroke();
+  if (b.atmo) {
+    cx2.beginPath(); cx2.arc(W/2,H/2,PX(b.R + b.atmo),0,TAU);
+    cx2.strokeStyle = b.color + '2E'; cx2.setLineDash([]); cx2.lineWidth = 1; cx2.stroke();
+  }
+
+  // station orbit
+  const stn = S.objects.find(o => o.id === 'STATION' && o.soi === S.soi);
+  if (stn) {
+    const se = elements(stn.r, stn.v, b.mu);
+    stroke(conicPath(se, b.mu, b.soi), '#5C4B15', [3,4], 1);
+    disc(stn.r, 3, '#E8C04A', '#E8C04A');
+    tag(stn.r, 'STN', '#E8C04A', -7);
+  }
+
+  // own trajectory
+  stroke(conicPath(e, b.mu, isFinite(b.soi)?b.soi:e.r*4), '#3FA9C9', [], 1.3);
+
+  // apsides
+  if (e.e < 1 && isFinite(e.ra)) {
+    const ap = { x:e.ra*Math.cos(e.argp+Math.PI), y:e.ra*Math.sin(e.argp+Math.PI) };
+    disc(ap, 2.5, '#F2A33C', null); tag(ap, 'AP', '#9A6A2A', -6);
+  }
+  const pe = { x:e.rp*Math.cos(e.argp), y:e.rp*Math.sin(e.argp) };
+  disc(pe, 2.5, '#F2A33C', null); tag(pe, 'PE', '#9A6A2A', -6);
+
+  // vehicle
+  const vhat = V.unit(S.v);
+  const CX = W/2 + PX(S.r.x), CY = H/2 - PX(S.r.y);
+  cx2.save(); cx2.translate(CX, CY); cx2.rotate(-Math.atan2(vhat.y, vhat.x));
+  if (S.burn) {
+    cx2.beginPath(); cx2.moveTo(-5,0);
+    const fl = 9 + Math.random()*5, sgn = (S.burn.dir==='RET') ? 1 : -1;
+    cx2.lineTo(sgn*fl, -2.6); cx2.lineTo(sgn*fl, 2.6); cx2.closePath();
+    cx2.fillStyle = '#F2A33Ccc'; cx2.fill();
+  }
+  cx2.beginPath(); cx2.moveTo(6,0); cx2.lineTo(-4,-3.6); cx2.lineTo(-4,3.6); cx2.closePath();
+  cx2.fillStyle = '#F2A33C'; cx2.fill();
+  cx2.restore();
+
+  document.getElementById('scope-tag').textContent =
+    `ORBITAL PLOT · ${b.name}` + (S.target ? `  ▸ TGT ${S.target}` : '');
+  document.getElementById('scope-scale').textContent = `⟷ ${fmtDist(ringStep)}/ring`;
+}
+
+function drawProximity(tgt) {
+  const range = V.len(tgt.r);
+  const span = Math.max(range * 2.6, 0.06);
+  const kmpx = span / (Math.min(W,H) * 0.44);
+  const P = (v) => v / kmpx;
+  cx2.save();
+  cx2.strokeStyle = '#111C28'; cx2.lineWidth = 1;
+  for (let k = 1; k <= 5; k++) { cx2.beginPath(); cx2.arc(W/2,H/2, P(span/5*k), 0, TAU); cx2.stroke(); }
+  cx2.beginPath(); cx2.moveTo(W/2-8,H/2); cx2.lineTo(W/2+8,H/2);
+  cx2.moveTo(W/2,H/2-8); cx2.lineTo(W/2,H/2+8); cx2.strokeStyle='#1E5A48'; cx2.stroke();
+
+  // relative velocity vector (scaled for legibility)
+  const rv = tgt.v, rvm = V.len(rv);
+  if (rvm > 1e-7) {
+    const s = Math.min(P(range)*0.8, P(rvm*120));
+    const u = V.unit(rv);
+    cx2.beginPath(); cx2.moveTo(W/2,H/2);
+    cx2.lineTo(W/2 + u.x*s, H/2 - u.y*s);
+    cx2.strokeStyle = '#E4553C'; cx2.lineWidth = 1.4; cx2.stroke();
+  }
+  const TX = W/2 + P(tgt.r.x), TY = H/2 - P(tgt.r.y);
+  cx2.beginPath(); cx2.arc(TX,TY,5,0,TAU); cx2.strokeStyle='#E8C04A'; cx2.lineWidth=1.4; cx2.stroke();
+  cx2.beginPath(); cx2.arc(TX,TY,1.6,0,TAU); cx2.fillStyle='#E8C04A'; cx2.fill();
+  cx2.beginPath(); cx2.moveTo(6,0); cx2.closePath();
+  cx2.fillStyle = '#F2A33C';
+  cx2.beginPath(); cx2.arc(W/2,H/2,3,0,TAU); cx2.fill();
+  cx2.restore();
+  document.getElementById('scope-tag').textContent = 'PROXIMITY OPS · STATION';
+  document.getElementById('scope-scale').textContent = `⟷ ${(span/5*1000).toFixed(0)} m/ring`;
+}
+
+function niceStep(x) {
+  const p = Math.pow(10, Math.floor(Math.log10(Math.max(x,1e-6))));
+  const n = x/p;
+  return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * p;
+}
+</script>
+
+<script>
+/* ============================================================
+   FORMATTING + SCRATCHPAD
+   ============================================================ */
+function fmtDist(km) {
+  if (!isFinite(km)) return '∞';
+  const s = km < 0 ? '-' : ''; km = Math.abs(km);
+  if (km < 1)    return s + (km*1000).toFixed(0) + ' m';
+  if (km < 100)  return s + km.toFixed(2) + ' km';
+  if (km < 1e6)  return s + Math.round(km).toLocaleString('en-US') + ' km';
+  if (km < 1e9)  return s + (km/1e6).toFixed(3) + '×10⁶ km';
+  return s + (km/AU).toFixed(4) + ' AU';
+}
+function fmtVel(kms) {
+  if (!isFinite(kms)) return '—';
+  return Math.abs(kms) < 1 ? (kms*1000).toFixed(1) + ' m/s' : kms.toFixed(3) + ' km/s';
+}
+function fmtDV(ms) { return (ms >= 1000 ? (ms/1000).toFixed(3)+' km/s' : ms.toFixed(1)+' m/s'); }
+function fmtT(sec) {
+  if (!isFinite(sec)) return '——';
+  const neg = sec < 0 ? '-' : ''; sec = Math.abs(Math.round(sec));
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600),
+        m = Math.floor(sec%3600/60), s = sec%60;
+  const p = (n,w=2) => String(n).padStart(w,'0');
+  return neg + (d ? `${p(d,3)}:` : '') + `${p(h)}:${p(m)}:${p(s)}`;
+}
+function fmtMET(sec) {
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600),
+        m = Math.floor(sec%3600/60), s = Math.floor(sec%60);
+  const p = (n,w=2) => String(n).padStart(w,'0');
+  return `${p(d,3)}:${p(h)}:${p(m)}:${p(s)}`;
+}
+const pad = (s,n) => String(s).padEnd(n,' ');
+
+const logEl = document.getElementById('log');
+function say(text, cls) {
+  const p = document.createElement('p');
+  p.className = 'ln ' + (cls || 'out');
+  p.innerHTML = String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/\{([^}]*)\}/g, '<span class="v">$1</span>');
+  logEl.appendChild(p);
+  while (logEl.childElementCount > 400) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function row(k, v, cls) { say(pad(k,14) + v, cls || 'out'); }
+function head(t) { say(t, 'hd'); }
+
+/* ============================================================
+   HUD
+   ============================================================ */
+function updateHUD() {
+  const d = D, b = d.b || soiBody();
+  const set = (id, v) => { const n = document.getElementById(id); if (n.textContent !== v) n.textContent = v; };
+  set('r-met', fmtMET(S.t));
+  set('r-warp', S.warp === 0 ? 'HOLD' : S.warp.toLocaleString('en-US') + '×');
+  set('r-soi', b.name);
+  set('r-dv', fmtDV(d.dv || 0));
+  set('d-alt', fmtDist(d.alt));
+  set('d-vel', Math.abs(d.e.v) < 1 ? (d.e.v*1000).toFixed(0)+' m/s' : d.e.v.toFixed(2)+' km/s');
+  // Below 60 km on a landing, apsides stop meaning anything and the two numbers
+  // that decide whether you survive are descent rate and lateral drift.
+  const descent = S.landingAllowed && d.alt < 60 && S.status === 'flight';
+  const vspd = -d.e.vr, hspd = Math.abs(V.crs(V.unit(S.r), S.v));
+  set('k-apo', descent ? 'Descent rate' : 'Apoapsis');
+  set('k-per', descent ? 'Lateral drift' : 'Periapsis');
+  set('d-apo', descent ? fmtVel(vspd) : (d.escape ? 'ESCAPE' : fmtDist(d.apoAlt)));
+  set('d-per', descent ? fmtVel(hspd) : fmtDist(d.perAlt));
+  set('d-ecc', (d.e.e).toFixed(4));
+  set('d-prd', d.e.period === Infinity ? '——' : fmtT(d.e.period));
+
+  const apoRO = document.getElementById('d-apo').parentElement;
+  const perRO = document.getElementById('d-per').parentElement;
+  if (descent) {
+    apoRO.className = 'ro' + (vspd*1000 > 12 ? ' bad' : vspd*1000 > 4 ? ' warn' : '');
+    perRO.className = 'ro' + (hspd*1000 > 8 ? ' bad' : hspd*1000 > 3 ? ' warn' : '');
+  } else {
+    apoRO.className = 'ro';
+    perRO.className = 'ro' + (d.perAlt < 0 ? ' bad' : (b.atmo && d.perAlt < b.atmo ? ' warn' : ''));
+  }
+
+  const lamp = document.getElementById('r-lamp');
+  let txt = 'NOMINAL', cls = 'ok';
+  if (S.status === 'lost')      { txt = 'VEHICLE LOST'; cls = 'crit'; }
+  else if (S.completed)         { txt = 'OBJECTIVES MET'; cls = 'ok'; }
+  else if (S.status === 'landed')   { txt = 'LANDED'; cls = 'ok'; }
+  else if (S.burn)              { txt = 'ENGINE ' + S.burn.dir; cls = 'caution'; }
+  else if (S.power.batt <= 0.1) { txt = 'BUS UNDERVOLT'; cls = 'crit'; }
+  else if (d.perAlt < 0)        { txt = 'IMPACT TRAJ'; cls = 'crit'; }
+  else if (S.therm.hull > (S.thermLimit||800)*0.8) { txt = 'THERMAL'; cls = 'caution'; }
+  else if (S.power.batt < S.power.battMax*0.2) { txt = 'LOW POWER'; cls = 'caution'; }
+  else if (S.sched)             { txt = 'BURN ARMED'; cls = 'caution'; }
+  if (lamp.textContent !== txt) lamp.textContent = txt;
+  lamp.className = 'lamp ' + cls;
+
+  const done = S.objectives.filter(o => o.done).length;
+  document.getElementById('p-mis').textContent = S.mission ? S.mission.code + ' · ' + S.mission.name : 'NO MISSION';
+  document.getElementById('p-obj').textContent = S.objectives.length ? `${done}/${S.objectives.length} OBJ` : '';
+}
+</script>
+
+<script>
+/* ============================================================
+   COMMANDS
+   ============================================================ */
+const DIRS = {
+  PRO:'PRO', PROGRADE:'PRO', P:'PRO',
+  RET:'RET', RETROGRADE:'RET', R:'RET',
+  ROUT:'ROUT', RADOUT:'ROUT', OUT:'ROUT', UP:'ROUT',
+  RIN:'RIN', RADIN:'RIN', IN:'RIN', DOWN:'RIN',
+};
+const DIRNAME = { PRO:'prograde', RET:'retrograde', ROUT:'radial out', RIN:'radial in' };
+
+function startBurn(dir, dur, scheduled) {
+  if (S.status !== 'flight') return say('Vehicle is not in flight.', 'err');
+  if (S.craft.fuel <= 0) return say('No main propellant remaining.', 'err');
+  if (S.burn) return say('Engine already lit. CANCEL first.', 'err');
+  S.preBurnWarp = S.warp;
+  if (S.warp > 10) S.warp = 10;
+  S.burn = { dir, left:dur, total:dur };
+  const est = burnDV(dur);
+  say(`IGNITION · ${DIRNAME[dir]} for {${dur.toFixed(1)} s}  ≈ {${fmtDV(est)}}`
+      + (scheduled ? '  (scheduled)' : ''), 'key');
+}
+function burnDV(dur) {
+  const m0 = craftMass();
+  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  const m1 = Math.max(m0 - Math.min(S.craft.fuel, mdot*dur), 1);
+  return S.craft.isp*G0*Math.log(m0/m1);
+}
+/** seconds of burn needed for a given ΔV (m/s) */
+function burnTimeFor(dv) {
+  const m0 = craftMass();
+  const m1 = m0 / Math.exp(dv/(S.craft.isp*G0));
+  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  return (m0 - m1)/mdot;
+}
+
+const WARPS = [0,1,5,10,50,100,1000,10000,100000,1000000];
+
+function exec(raw) {
+  const line = raw.trim();
+  if (!line) return;
+  say(line, 'cmd');
+  const tok = line.toUpperCase().split(/\s+/);
+  const c = tok[0], A = tok.slice(1);
+  const num = (i, def) => { const n = parseFloat(A[i]); return isFinite(n) ? n : def; };
+
+  switch (c) {
+
+  case 'HELP': case '?': case 'MAN': return cmdHelp(A[0]);
+
+  case 'STAT': case 'PFD': return cmdStat();
+  case 'NAV':  case 'ORB': return cmdNav();
+  case 'TIME': case 'CLK': {
+    head('CLOCK');
+    row('MET', fmtMET(S.t));
+    row('WARP', S.warp === 0 ? 'HOLD' : S.warp + '×');
+    if (S.sched) row('ARMED', `${DIRNAME[S.sched.dir]} ${S.sched.dur}s at ${S.sched.at}`);
+    return;
+  }
+
+  case 'BURN': case 'B': {
+    const dir = DIRS[A[0]];
+    if (!dir) return say('Usage: BURN <PRO|RET|RIN|ROUT> <seconds> [AT PE|AP|T+<s>]', 'err');
+    const dur = num(1, NaN);
+    if (!isFinite(dur) || dur <= 0) return say('Burn duration in seconds is required. e.g. BURN PRO 42', 'err');
+    const atIx = A.indexOf('AT');
+    if (atIx >= 0) {
+      const w = A[atIx+1] || '';
+      if (w === 'PE' || w === 'AP') {
+        S.sched = { dir, dur, at:w };
+        const tt = w === 'PE' ? D.tPeri : D.tApo;
+        return say(`BURN ARMED · ${DIRNAME[dir]} ${dur.toFixed(1)} s at ${w === 'PE' ? 'periapsis' : 'apoapsis'}, T−{${fmtT(tt)}}. Ignition starts {${(dur/2).toFixed(1)} s} early to centre the burn.`, 'key');
+      }
+      if (w === 'XFER' || w === 'WINDOW') {
+        const tk = A[atIx+2];
+        if (!tk || !BODIES[tk]) return say('Usage: BURN <DIR> <SEC> AT XFER <BODY>', 'err');
+        if (BODIES[tk].parent !== S.soi) return say(`${tk} does not orbit ${soiBody().name}.`, 'err');
+        S.sched = { dir, dur, at:'XFER', body:tk };
+        const win = transferWindow(tk);
+        return say(`BURN ARMED · ${DIRNAME[dir]} ${dur.toFixed(1)} s at the ${tk} transfer window, T−{${fmtT(win.wait)}}. Wind the clock up — the console will hold the node.`, 'key');
+      }
+      const m = w.match(/^T\+?(\d+(\.\d+)?)$/);
+      if (m) { S.sched = { dir, dur, at:'T', when:S.t + parseFloat(m[1]) };
+        return say(`BURN ARMED · ${DIRNAME[dir]} ${dur.toFixed(1)} s in {${fmtT(parseFloat(m[1]))}}.`, 'key'); }
+      return say('AT takes PE, AP, or T+<seconds>.', 'err');
+    }
+    return startBurn(dir, dur);
+  }
+
+  case 'CANCEL': case 'ABORT': {
+    if (S.burn) { endBurn('BURN ABORTED', 'warn'); return; }
+    if (S.sched) { S.sched = null; return say('Armed burn cleared.', 'sys'); }
+    return say('Nothing to cancel.', 'sys');
+  }
+
+  case 'HOLD': {
+    const dir = DIRS[A[0]];
+    if (!dir) return say('Usage: HOLD <PRO|RET|RIN|ROUT>', 'err');
+    S.att = dir;
+    return say(`Attitude hold: ${DIRNAME[dir]}.`, 'sys');
+  }
+
+  case 'WARP': case 'W': {
+    if (!A[0]) return say(`Warp is ${S.warp}×. Available: ${WARPS.join(', ')}`, 'sys');
+    if (A[0] === 'UP' || A[0] === '+') { const i = WARPS.indexOf(S.warp); S.warp = WARPS[Math.min(i+1, WARPS.length-1)]; }
+    else if (A[0] === 'DOWN' || A[0] === '-') { const i = WARPS.indexOf(S.warp); S.warp = WARPS[Math.max(i-1,0)]; }
+    else { const n = num(0, NaN);
+      if (!isFinite(n)) return say('Usage: WARP <rate>  (0 holds the clock)', 'err');
+      S.warp = WARPS.reduce((a,b) => Math.abs(b-n) < Math.abs(a-n) ? b : a); }
+    if (S.burn && S.warp > 10) { S.warp = 10; say('Warp limited to 10× with the engine lit.', 'warn'); }
+    return say(S.warp === 0 ? 'Clock HOLD.' : `Time warp ${S.warp}×.`, 'sys');
+  }
+  case 'GO': case 'RUN': { S.warp = Math.max(1, S.warp); return say('Clock running.', 'sys'); }
+
+  case 'TGT': case 'TARGET': {
+    if (!A[0]) { S.target = null; return say('Target cleared.', 'sys'); }
+    const t = A[0];
+    if (t === 'STATION' || t === 'STN') {
+      if (!S.objects.some(o => o.id === 'STATION')) return say('No station in this scenario.', 'err');
+      S.target = 'STATION';
+    } else if (BODIES[t]) S.target = t;
+    else return say(`Unknown target "${A[0]}". Try a body name or STATION.`, 'err');
+    return say(`Target set: {${S.target}}.`, 'sys');
+  }
+
+  case 'PLAN': return cmdPlan(A);
+  case 'DOCK': case 'PROX': return cmdDock();
+  case 'TRANS': case 'RCS': return cmdTrans(A);
+
+  case 'PWR': case 'POWER': case 'EPS': return cmdPwr(A);
+  case 'FUEL': case 'PROP': return cmdFuel();
+  case 'COMM': case 'DSN': return cmdComm();
+  case 'THERM': case 'TEMP': return cmdTherm();
+  case 'LIFE': case 'ECLSS': return cmdLife();
+  case 'SYS': case 'STATUS': { cmdPwr([]); cmdFuel(); cmdTherm(); return; }
+
+  case 'MIS': case 'MISSION': case 'MISSIONS': return cmdMis(A);
+  case 'LOG': case 'OBJ': return cmdObj();
+  case 'RESTART': case 'RESET': {
+    if (!S.mission) return say('No mission loaded. Type MIS.', 'err');
+    return loadMission(S.mission.id);
+  }
+  case 'CLS': case 'CLEAR': { logEl.innerHTML = ''; return; }
+  case 'LAND': {
+    S.landingAllowed = !S.landingAllowed;
+    return say(`Landing mode ${S.landingAllowed ? 'ARMED — touchdown will be attempted' : 'SAFED'}.`, 'sys');
+  }
+  default:
+    return say(`Unrecognised command "${c}". Type HELP for the command list.`, 'err');
+  }
+}
+
+/* ---- readout pages ---------------------------------------- */
+function cmdStat() {
+  const d = D, b = d.b;
+  head('PRIMARY FLIGHT DISPLAY');
+  row('REFERENCE', b.name + `  (µ ${b.mu.toExponential(4)} km³/s²)`);
+  row('MET', fmtMET(S.t));
+  row('ALTITUDE', fmtDist(d.alt));
+  row('VELOCITY', fmtVel(d.e.v) + `   (vert ${fmtVel(d.e.vr)})`);
+  row('APOAPSIS', d.escape ? 'escape trajectory' : fmtDist(d.apoAlt) + `   T−${fmtT(d.tApo)}`);
+  row('PERIAPSIS', fmtDist(d.perAlt) + (d.escape ? '' : `   T−${fmtT(d.tPeri)}`));
+  row('ECCENTRICITY', d.e.e.toFixed(5));
+  row('PERIOD', d.e.period === Infinity ? '——' : fmtT(d.e.period));
+  row('ΔV REMAINING', fmtDV(d.dv));
+  row('MASS', craftMass().toFixed(0) + ' kg');
+  if (S.burn) row('ENGINE', `${DIRNAME[S.burn.dir].toUpperCase()} · ${S.burn.left.toFixed(1)} s left`, 'warn');
+  if (S.sched) row('ARMED', `${DIRNAME[S.sched.dir]} ${S.sched.dur} s at ${S.sched.at}`, 'warn');
+  if (d.perAlt < 0) say('PERIAPSIS IS BELOW THE SURFACE — this is an impact trajectory.', 'err');
+}
+function cmdNav() {
+  const d = D, b = d.b, e = d.e;
+  head('NAVIGATION');
+  row('SEMI-MAJOR a', isFinite(e.a) ? fmtDist(e.a) : '∞');
+  row('ECCENTRICITY', e.e.toFixed(6) + (e.e < 1 ? ' (elliptic)' : e.e > 1 ? ' (hyperbolic)' : ' (parabolic)'));
+  row('PERI RADIUS', fmtDist(e.rp) + `   alt ${fmtDist(e.rp - b.R)}`);
+  row('APO RADIUS', isFinite(e.ra) ? fmtDist(e.ra) + `   alt ${fmtDist(e.ra - b.R)}` : '——');
+  row('TRUE ANOM ν', (e.nu*180/Math.PI).toFixed(2) + '°');
+  row('ARG OF PERI', (normAngle(e.argp)*180/Math.PI).toFixed(2) + '°');
+  row('SPEC. ENERGY', e.energy.toFixed(4) + ' km²/s²');
+  row('ANG MOMENTUM', Math.abs(e.h).toFixed(1) + ' km²/s' + (e.dir > 0 ? '  prograde' : '  retrograde'));
+  row('DIRECTION', e.dir > 0 ? 'counter-clockwise' : 'clockwise');
+  row('SOI RADIUS', isFinite(b.soi) ? fmtDist(b.soi) : '——');
+  row('V-CIRCULAR', fmtVel(vCirc(b.mu, e.r)) + '  at this radius');
+  row('V-ESCAPE', fmtVel(Math.sqrt(2*b.mu/e.r)));
+  const t = targetRel();
+  if (t) { say(''); row('TARGET', t.name, 'key');
+    row('  RANGE', fmtDist(V.len(t.r)));
+    row('  REL VEL', fmtVel(V.len(t.v)));
+    const closing = -V.dot(V.unit(t.r), t.v);
+    row('  CLOSING', fmtVel(closing) + (closing > 0 ? '  (approaching)' : '  (opening)')); }
+}
+function cmdPwr(A) {
+  if (A && A[0] && ['HEAT','SCI','COMM'].includes(A[0])) {
+    const on = A[1] !== 'OFF';
+    S.loads[A[0]] = on;
+    return say(`${A[0]} load ${on ? 'ON' : 'OFF'}.`, 'sys');
+  }
+  head('ELECTRICAL POWER');
+  row('ARRAY OUTPUT', D.gen.toFixed(0) + ' W' + (D.ecl ? '   ECLIPSE — no illumination' : ''), D.ecl ? 'warn' : 'out');
+  row('SOLAR FLUX', D.flux.toFixed(0) + ' W/m²   at ' + (D.dSun/AU).toFixed(4) + ' AU');
+  row('BUS LOAD', D.load.toFixed(0) + ' W');
+  row('NET', (D.gen - D.load).toFixed(0) + ' W', D.gen - D.load < 0 ? 'warn' : 'ok');
+  const pct = S.power.batt/S.power.battMax*100;
+  row('BATTERY', `${S.power.batt.toFixed(1)} / ${S.power.battMax} Wh   ${pct.toFixed(0)}%`,
+      pct < 20 ? 'err' : pct < 50 ? 'warn' : 'ok');
+  const bars = Math.round(pct/5);
+  say('             [' + '█'.repeat(bars) + '·'.repeat(20-bars) + ']', pct < 20 ? 'err' : 'ok');
+  if (D.gen < D.load) {
+    const hrs = S.power.batt / (D.load - D.gen);
+    row('ENDURANCE', fmtT(hrs*3600) + ' to bus undervolt', 'warn');
+  }
+  say('');
+  say('Switchable loads —  PWR HEAT OFF  ·  PWR SCI ON  ·  PWR COMM OFF', 'dim');
+  for (const k of ['HEAT','COMM','SCI'])
+    row('  ' + k, S.loads[k] ? 'ON' : 'OFF', S.loads[k] ? 'ok' : 'dim');
+}
+function cmdFuel() {
+  head('PROPULSION');
+  row('ENGINE', `${(S.craft.thrust*1000).toFixed(0)} N   Isp ${S.craft.isp} s`);
+  const pct = S.craft.fuelMax ? S.craft.fuel/S.craft.fuelMax*100 : 0;
+  row('MAIN PROP', `${S.craft.fuel.toFixed(1)} / ${S.craft.fuelMax.toFixed(0)} kg   ${pct.toFixed(1)}%`,
+      pct < 15 ? 'warn' : 'out');
+  const bars = Math.round(pct/5);
+  say('             [' + '█'.repeat(bars) + '·'.repeat(20-bars) + ']', pct < 15 ? 'warn' : 'ok');
+  row('RCS PROP', `${S.craft.rcs.toFixed(2)} / ${S.craft.rcsMax.toFixed(0)} kg`);
+  row('DRY MASS', S.craft.dry.toFixed(0) + ' kg');
+  row('TOTAL MASS', craftMass().toFixed(1) + ' kg');
+  row('ΔV REMAINING', fmtDV(dvRemaining()), 'key');
+  row('ΔV EXPENDED', fmtDV(S.ledger.dvUsed));
+  row('BURN RATE', (S.craft.thrust*1000/(S.craft.isp*G0)).toFixed(3) + ' kg/s');
+  row('FULL-THROTTLE', fmtT(S.craft.fuel/(S.craft.thrust*1000/(S.craft.isp*G0))) + ' of burn time left');
+}
+function cmdComm() {
+  head('COMMUNICATIONS');
+  row('RANGE TO EARTH', fmtDist(D.dEarth));
+  row('ONE-WAY DELAY', D.lightTime < 1 ? (D.lightTime*1000).toFixed(0)+' ms' : fmtT(D.lightTime));
+  row('ROUND TRIP', D.lightTime < 1 ? (D.lightTime*2000).toFixed(0)+' ms' : fmtT(D.lightTime*2));
+  const sig = 1e6 / Math.max(D.dEarth, 1)**2 * 1e6;
+  row('SIGNAL', S.loads.COMM ? (sig > 1 ? 'STRONG' : sig > 0.02 ? 'USABLE' : 'MARGINAL') : 'TRANSMITTER OFF',
+      S.loads.COMM ? 'ok' : 'warn');
+  row('DATA RATE', S.loads.COMM ? Math.max(0.1, Math.min(2048, sig*40)).toFixed(1) + ' kbps' : '—');
+  if (D.lightTime > 1) say(`At this range every instruction takes ${fmtT(D.lightTime)} to arrive. Real crews plan around it; here the console still responds instantly.`, 'dim');
+}
+function cmdTherm() {
+  head('THERMAL');
+  const tl = S.thermLimit || 800;
+  row('HULL', S.therm.hull.toFixed(1) + ' °C',
+      S.therm.hull > tl*0.8 ? 'err' : S.therm.hull > tl*0.4 ? 'warn' : 'ok');
+  row('SOLAR FLUX', D.flux.toFixed(0) + ' W/m²   (' + (D.flux/1361).toFixed(2) + '× Earth)');
+  row('ILLUMINATION', D.ecl ? 'ECLIPSE' : 'SUNLIT');
+  row('LIMIT', tl + ' °C structural failure');
+  if (S.therm.hull > tl*0.55) say('Raise perihelion. Heat load rises with the inverse square of solar distance.', 'warn');
+}
+function cmdLife() {
+  head('LIFE SUPPORT');
+  if (!S.craft.crew) { row('CREW', 'none — uncrewed vehicle'); return; }
+  row('CREW', S.craft.crew);
+  const hrs = S.craft.o2 / S.craft.crew;
+  row('O₂ REMAINING', fmtT(hrs*3600) + ` (${S.craft.o2.toFixed(0)} crew-hours)`, hrs < 24 ? 'warn' : 'ok');
+  row('CABIN', S.power.batt > 0 ? '101.3 kPa · 21.1 °C' : 'THERMAL CONTROL LOST', S.power.batt > 0 ? 'ok' : 'err');
+  row('CO₂ SCRUBBER', S.loads.HEAT ? 'NOMINAL' : 'OFFLINE — powered down', S.loads.HEAT ? 'ok' : 'err');
+}
+</script>
+
+<script>
+/* ============================================================
+   PLAN — onboard maneuver solver
+   ============================================================ */
+function quoteBurn(dv, whereLabel, tt, solved) {
+  const dir = dv >= 0 ? 'PRO' : 'RET';
+  const impulsive = burnTimeFor(Math.abs(dv));
+  row('ΔV REQUIRED', fmtDV(Math.abs(dv)) + '  ' + DIRNAME[dir], 'key');
+  if (Math.abs(dv) > dvRemaining()) say('INSUFFICIENT PROPELLANT for this maneuver.', 'err');
+
+  let secs = impulsive;
+  if (solved && solved.dur != null) {
+    secs = solved.dur;
+    row('BURN TIME', secs.toFixed(1) + ' s at full throttle');
+    if (secs > impulsive * 1.03)
+      say(`Solved by flying the burn: ${(secs - impulsive).toFixed(1)} s longer than the impulsive figure, because the vehicle keeps moving while the engine runs.`, 'dim');
+  } else if (solved && solved.dur == null && solved.short) {
+    row('BURN TIME', 'not achievable — propellant runs out first', 'err');
+    say('Burning every drop still falls short of this target. Choose a nearer one.', 'err');
+    return null;
+  } else {
+    row('BURN TIME', secs.toFixed(1) + ' s at full throttle');
+  }
+  if (secs > 90) say('Long burn — time warp drops to 10× while the engine is lit.', 'dim');
+
+  if (whereLabel) {
+    row('IGNITION', `${whereLabel}` + (isFinite(tt) ? `, T\u2212${fmtT(tt)}` : ''));
+    say('');
+    const at = whereLabel.includes('periapsis') ? 'PE' : whereLabel.includes('apoapsis') ? 'AP' : null;
+    if (at) say(`  \u2192  BURN ${dir} ${secs.toFixed(1)} AT ${at}`, 'ok');
+    else    say(`  \u2192  BURN ${dir} ${secs.toFixed(1)}`, 'ok');
+    say('The console lights the engine half a burn early so the impulse is centred on the node.', 'dim');
+  }
+  return secs;
+}
+
+/** Fly a finite burn forward without touching live state. */
+function simBurn(r0, v0, mu, mode, dur, m0) {
+  let r = {...r0}, v = {...v0}, m = m0, t = 0;
+  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  const fuel = S.craft.fuel;
+  while (t < dur - 1e-9) {
+    const dt = Math.min(0.5, dur - t);
+    if (m0 - m >= fuel) break;                       // tanks dry
+    const dirv = mode === 'PRO'  ? V.unit(v)
+               : mode === 'RET'  ? V.mul(V.unit(v), -1)
+               : mode === 'ROUT' ? V.unit(r) : V.mul(V.unit(r), -1);
+    const aT = S.craft.thrust / m;
+    const acc = (rv) => { const rr = V.len(rv);
+      return V.add(V.mul(rv, -mu/(rr*rr*rr)), V.mul(dirv, aT)); };
+    const k1r = v,                          k1v = acc(r);
+    const k2r = V.add(v, V.mul(k1v,dt/2)),  k2v = acc(V.add(r, V.mul(k1r,dt/2)));
+    const k3r = V.add(v, V.mul(k2v,dt/2)),  k3v = acc(V.add(r, V.mul(k2r,dt/2)));
+    const k4r = V.add(v, V.mul(k3v,dt)),    k4v = acc(V.add(r, V.mul(k3r,dt)));
+    r = V.add(r, V.mul(V.add(V.add(k1r,V.mul(k2r,2)), V.add(V.mul(k3r,2),k4r)), dt/6));
+    v = V.add(v, V.mul(V.add(V.add(k1v,V.mul(k2v,2)), V.add(V.mul(k3v,2),k4v)), dt/6));
+    m -= mdot*dt; t += dt;
+  }
+  return { r, v, m };
+}
+
+/** Seconds from now until the named node. */
+function nodeTime(node, body) {
+  const b = soiBody(), e = el();
+  if (node === 'AP') return tToApo(e, b.mu);
+  if (node === 'PE') return tToPeri(e, b.mu);
+  if (node === 'XFER') { const w = transferWindow(body); return w ? w.wait : Infinity; }
+  return 0;
+}
+
+/**
+ * Solve for the burn duration that actually achieves `target`, by flying the
+ * burn. An impulsive ΔV quote under-delivers badly on long burns — a 350 s TLI
+ * leaves apoapsis ~50,000 km short — because the vehicle climbs and its thrust
+ * vector swings while the engine runs.
+ */
+function solveBurn(node, mode, metric, target, body) {
+  const b = soiBody(), mu = b.mu;
+  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  const maxDur = S.craft.fuel / mdot;
+  const t0 = nodeTime(node, body);
+  if (!isFinite(t0)) return null;
+  const f = (dur) => {
+    const lead = Math.max(0, t0 - dur/2);
+    const st = propagate(S.r, S.v, mu, lead);
+    const o  = simBurn(st.r, st.v, mu, mode, dur, craftMass());
+    const oe = elements(o.r, o.v, mu);
+    return metric(oe);
+  };
+  let lo = 0, hi = maxDur;
+  const flo = f(lo), fhi = f(hi);
+  if (!isFinite(flo) || !isFinite(fhi)) return null;
+  const rising = fhi > flo;
+  if (rising ? (target > fhi || target < flo) : (target < fhi || target > flo))
+    return { dur: null, best: fhi, short: rising ? target > fhi : target < fhi };
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi)/2, fm = f(mid);
+    if (rising ? fm < target : fm > target) lo = mid; else hi = mid;
+  }
+  return { dur: (lo + hi)/2, best: f((lo+hi)/2) };
+}
+
+/**
+ * Coast a trajectory forward through sphere-of-influence changes without
+ * touching live state, reporting the encounter with `tk`.
+ * Step size is governed by the closing rate on the target, so the integration
+ * takes huge strides in cruise and tightens automatically near arrival.
+ */
+function coastEncounter(r0, v0, soi0, t0, tk, maxT) {
+  const tb = BODIES[tk];
+  let r = {...r0}, v = {...v0}, soi = soi0, t = t0, miss = Infinity;
+  for (let n = 0; n < 20000; n++) {
+    if (t - t0 > maxT) break;
+    const b = BODIES[soi], e = elements(r, v, b.mu);
+    let dt = Math.max(5, 0.03 * e.r / Math.max(e.v, 1e-9));
+    if (BODIES[tk].parent === soi || soi === tk) {
+      const ts = bodyStateIn(soi, tk, t);
+      const rel = V.sub(r, ts.r), relv = V.sub(v, ts.v);
+      const d = V.len(rel);
+      miss = Math.min(miss, d);
+      if (d < tb.soi) {                       // arrived
+        const ae = elements(rel, relv, tb.mu);
+        return { entered:true, periAlt:ae.rp - tb.R, ecc:ae.e, t, miss:d };
+      }
+      const closing = -V.dot(V.unit(rel), relv);
+      if (closing > 1e-9) dt = Math.min(dt, Math.max(5, (d - tb.soi) * 0.45 / closing));
+    }
+    const o = propagate(r, v, b.mu, dt); r = o.r; v = o.v; t += dt;
+    if (V.len(r) < b.R) return { entered:false, crashed:true, t, miss };
+    if (b.parent && V.len(r) > b.soi) {
+      const st = bodyStateInParent(soi, t);
+      r = V.add(r, st.r); v = V.add(v, st.v); soi = b.parent;
+    } else {
+      for (const c of (CHILDREN[soi] || [])) {
+        const st = bodyStateInParent(c, t), rel = V.sub(r, st.r);
+        if (V.len(rel) < BODIES[c].soi) {
+          r = rel; v = V.sub(v, st.v); soi = c;
+          if (c === tk) {
+            const ae = elements(r, v, BODIES[c].mu);
+            return { entered:true, periAlt:ae.rp - BODIES[c].R, ecc:ae.e, t, miss:V.len(rel) };
+          }
+        }
+      }
+    }
+  }
+  return { entered:false, t, miss };
+}
+
+/**
+ * Solve a real encounter, not just a Hohmann. A minimum-energy transfer aimed
+ * at a body's orbital radius is a collision course; this searches ignition time
+ * for a trajectory that arrives with a usable periapsis.
+ */
+function targetEncounter(tk) {
+  const b = soiBody(), mu = b.mu, tb = BODIES[tk];
+  const w = transferWindow(tk);
+  if (!w || w.wait < 0 || !isFinite(w.wait)) return null;
+  const mode = w.dv1 >= 0 ? 'PRO' : 'RET';
+  const e = el();
+  const tof = w.tof;
+  const goal = Math.max(800, tb.R * 0.50);      // ~870 km over the Moon: clears the surface with room to spare
+  // One departure period sweeps every transfer orientation. Note how steep this
+  // is: shifting ignition by a minute rotates the transfer's apsidal line ~4°,
+  // which moves the arrival point by tens of thousands of kilometres. So scan
+  // for a bracket, then bisect — stepping toward the answer never converges.
+  const Pc = isFinite(e.period) ? e.period : tof/6;
+  const span = Math.min(1.1 * Pc, tof / 6);
+
+  const trial = (tI, dur) => {
+    if (tI < dur/2) return null;
+    const lead = tI - dur/2;
+    const st = propagate(S.r, S.v, mu, lead);
+    const o  = simBurn(st.r, st.v, mu, mode, dur, craftMass());
+    return coastEncounter(o.r, o.v, S.soi, S.t + lead + dur, tk, tof * 2.6);
+  };
+  /** Closest-approach altitude over the target — continuous across the SOI edge. */
+  const qOf = (res) => !res ? Infinity : (res.entered ? res.periAlt : res.miss - tb.R);
+
+  let best = null;
+  const consider = (tI, dur, res) => {
+    const q = qOf(res);
+    if (!isFinite(q)) return;
+    const sc = (q < 50 ? 1e6 + Math.abs(q) : Math.abs(q - goal));
+    if (!best || sc < best.sc) best = { tI, dur, res, sc, q };
+  };
+
+  for (const k of [1.0, 1.12, 1.30]) {
+    const sk = solveBurn('XFER', mode, (oe) => isFinite(oe.ra) ? oe.ra : 1e12, w.r2*k, tk);
+    if (!sk || sk.dur == null) continue;
+    const dur = sk.dur, N = 140;
+    const ts = [], qs = [];
+    for (let i = 0; i <= N; i++) {
+      const tI = w.wait + (i/N - 0.5) * span;
+      const res = trial(tI, dur);
+      ts.push(tI); qs.push(qOf(res)); consider(tI, dur, res);
+    }
+    // bisect every bracket that straddles the aim point
+    for (let i = 0; i < N; i++) {
+      const q0 = qs[i], q1 = qs[i+1];
+      if (!isFinite(q0) || !isFinite(q1)) continue;
+      if ((q0 - goal) * (q1 - goal) > 0) continue;
+      let lo = ts[i], hi = ts[i+1], flo = q0;
+      for (let n = 0; n < 40; n++) {
+        const mid = (lo + hi)/2, res = trial(mid, dur), qm = qOf(res);
+        consider(mid, dur, res);
+        if (!isFinite(qm)) break;
+        if ((flo - goal) * (qm - goal) <= 0) hi = mid; else { lo = mid; flo = qm; }
+        if (Math.abs(qm - goal) < 5) break;
+      }
+    }
+    if (best && best.sc < 30) break;
+  }
+  if (!best || !best.res || !best.res.entered) return best ? { dur:best.dur, mode, tIgn:best.tI, arrival:best.res, dv:w.dv1, tof, window:w } : null;
+  const dur = best.dur;
+  return { dur, mode, tIgn:best.tI, arrival:best.res, dv:w.dv1, tof, window:w };
+}
+
+/** Hohmann window to a satellite of the current primary. */
+function transferWindow(tk) {
+  const b = soiBody(), mu = b.mu, e = el(), tb = BODIES[tk];
+  if (!tb || tb.parent !== S.soi) return null;
+  const r1 = e.r, r2 = tb.a, at = (r1+r2)/2;
+  const dv1 = (Math.sqrt(mu*(2/r1 - 1/at)) - e.v) * 1000;
+  const tof = Math.PI*Math.sqrt(at*at*at/mu);
+  const wt = TAU/tb.period;
+  const wc = e.period < Infinity ? TAU/e.period*e.dir : 0;
+  const phiReq = normAngle(Math.PI - wt*tof);
+  const thC = Math.atan2(S.r.y, S.r.x);
+  const st = bodyStateInParent(tk, S.t);
+  const phiNow = normAngle(Math.atan2(st.r.y, st.r.x) - thC);
+  const rel = wt - wc;
+  let dphi = phiReq - phiNow;
+  dphi = rel > 0 ? normAngle(dphi) : -normAngle(-dphi);
+  const wait = Math.abs(rel) < 1e-14 ? Infinity : dphi/rel;
+  return { r1, r2, at, dv1, tof, phiReq, phiNow, wait };
+}
+
+function cmdPlan(A) {
+  const b = D.b, mu = b.mu, e = D.e, sub = A[0] || '';
+
+  if (sub === 'CIRC' || sub === 'CIRCULARIZE') {
+    const at = A[1] === 'PE' ? 'PE' : 'AP';
+    if (at === 'AP' && !isFinite(e.ra)) return say('No apoapsis on an escape trajectory. Try PLAN CIRC PE.', 'err');
+    const r = at === 'AP' ? e.ra : e.rp;
+    head('MANEUVER · CIRCULARIZE AT ' + (at === 'AP' ? 'APOAPSIS' : 'PERIAPSIS'));
+    row('AT RADIUS', fmtDist(r) + `   alt ${fmtDist(r - b.R)}`);
+    row('CURRENT V', fmtVel(vAtR(mu, r, e.a)));
+    row('CIRCULAR V', fmtVel(vCirc(mu, r)));
+    const dvC = (vCirc(mu,r) - vAtR(mu,r,e.a))*1000;
+    const solC = solveBurn(at, dvC >= 0 ? 'PRO' : 'RET',
+      (oe) => at === 'AP' ? oe.rp : (isFinite(oe.ra) ? oe.ra : 1e12), r);
+    return quoteBurn(dvC, at === 'AP' ? 'at apoapsis' : 'at periapsis',
+      at === 'AP' ? D.tApo : D.tPeri, solC);
+  }
+
+  if (sub === 'APO' || sub === 'AP') {
+    const alt = parseFloat(A[1]);
+    if (!isFinite(alt)) return say('Usage: PLAN APO <target apoapsis altitude, km>', 'err');
+    const r1 = e.rp, r2 = alt + b.R;
+    if (r2 < r1) return say('Target apoapsis is below your periapsis. Use PLAN PERI instead.', 'err');
+    head('MANEUVER · RAISE APOAPSIS');
+    row('BURN AT', 'periapsis, ' + fmtDist(r1 - b.R) + ' alt');
+    row('NEW APOAPSIS', fmtDist(alt));
+    const v1 = vAtR(mu, r1, e.a), v2 = Math.sqrt(mu*(2/r1 - 2/(r1+r2)));
+    const solA = solveBurn('PE', v2 >= v1 ? 'PRO' : 'RET', (oe) => isFinite(oe.ra) ? oe.ra : 1e12, r2);
+    return quoteBurn((v2-v1)*1000, 'at periapsis', D.tPeri, solA);
+  }
+
+  if (sub === 'PERI' || sub === 'PE') {
+    const alt = parseFloat(A[1]);
+    if (!isFinite(alt)) return say('Usage: PLAN PERI <target periapsis altitude, km>', 'err');
+    if (!isFinite(e.ra)) return say('No apoapsis to burn at on an escape trajectory.', 'err');
+    const r1 = e.ra, r2 = alt + b.R;
+    head('MANEUVER · CHANGE PERIAPSIS');
+    row('BURN AT', 'apoapsis, ' + fmtDist(r1 - b.R) + ' alt');
+    row('NEW PERIAPSIS', fmtDist(alt));
+    const v1 = vAtR(mu, r1, e.a), v2 = Math.sqrt(mu*(2/r1 - 2/(r1+r2)));
+    const solP = solveBurn('AP', v2 >= v1 ? 'PRO' : 'RET', (oe) => oe.rp, r2);
+    return quoteBurn((v2-v1)*1000, 'at apoapsis', D.tApo, solP);
+  }
+
+  if (sub === 'ESC' || sub === 'ESCAPE') {
+    head('MANEUVER · ESCAPE ' + b.name);
+    const vesc = Math.sqrt(2*mu/e.r);
+    row('AT RADIUS', fmtDist(e.r));
+    row('CURRENT V', fmtVel(e.v));
+    row('ESCAPE V', fmtVel(vesc));
+    if (e.e >= 1) { say('Already on an escape trajectory.', 'ok');
+      row('SOI EXIT', fmtT(timeToSOIExit()) ); return; }
+    row('CHEAPEST AT', 'periapsis — the Oberth effect makes speed there worth more');
+    const vp = vAtR(mu, e.rp, e.a), vescp = Math.sqrt(2*mu/e.rp);
+    const solE = solveBurn('PE', 'PRO', (oe) => oe.energy, 0);
+    return quoteBurn((vescp - vp)*1000, 'at periapsis', D.tPeri, solE);
+  }
+
+  if (sub === 'XFER' || sub === 'TRANSFER') {
+    const tk = A[1];
+    if (!tk || !BODIES[tk]) return say('Usage: PLAN XFER <BODY>   e.g. PLAN XFER MOON', 'err');
+    if (BODIES[tk].parent !== S.soi)
+      return say(`${tk} does not orbit ${b.name}. Transfer from ${BODIES[tk].parent} instead — escape your current SOI first (PLAN ESC).`, 'err');
+    const w = transferWindow(tk);
+    head('MANEUVER · TRANSFER TO ' + tk);
+    row('DEPART RADIUS', fmtDist(w.r1));
+    row('ARRIVE RADIUS', fmtDist(w.r2));
+    row('FLIGHT TIME', fmtT(w.tof));
+    row('PHASE NOW', (w.phiNow*180/Math.PI).toFixed(1) + '°');
+    row('PHASE NEEDED', (w.phiReq*180/Math.PI).toFixed(1) + '°  at ignition', 'key');
+    row('WINDOW IN', isFinite(w.wait) ? fmtT(w.wait) : '——');
+    if (e.e > 0.02) say('Your orbit is not circular — circularize first for a clean solution.', 'warn');
+    say('');
+    row('ΔV REQUIRED', fmtDV(Math.abs(w.dv1)) + '  ' + (w.dv1 >= 0 ? 'prograde' : 'retrograde'), 'key');
+    if (Math.abs(w.dv1) > dvRemaining()) say('INSUFFICIENT PROPELLANT for this maneuver.', 'err');
+
+    say('Solving the encounter…', 'dim');
+    const sol = targetEncounter(tk);
+    if (sol && sol.arrival && sol.arrival.entered && sol.arrival.periAlt > 0) {
+      row('BURN TIME', sol.dur.toFixed(1) + ' s at full throttle');
+      row('IGNITION', `T−${fmtT(sol.tIgn)}`);
+      row('ARRIVAL', `${fmtT(sol.arrival.t - S.t)} from now`);
+      row('ARRIVAL PERIAPSIS', fmtDist(sol.arrival.periAlt) + ` over ${tk}`, 'ok');
+      say('');
+      say(`  →  BURN ${sol.mode} ${sol.dur.toFixed(2)} AT T+${sol.tIgn.toFixed(2)}`, 'ok');
+      say(`A textbook Hohmann aimed at ${tk}'s orbital radius is a collision course. This solution is flown forward through the sphere-of-influence change, and offset to arrive with a periapsis you can work with.`, 'dim');
+      say('Those decimals matter: one second of ignition time moves the arrival point about 20,000 km. Copy the line exactly.', 'warn');
+    } else {
+      const bs = burnTimeFor(Math.abs(w.dv1));
+      row('BURN TIME', bs.toFixed(1) + ' s at full throttle');
+      say('');
+      say(`  →  BURN ${w.dv1 >= 0 ? 'PRO' : 'RET'} ${bs.toFixed(1)} AT XFER ${tk}`, 'ok');
+      if (sol && sol.arrival && !sol.arrival.entered)
+        say(`No intercept found from this orbit — closest approach ${fmtDist(sol.arrival.miss)}. Circularize, then try again.`, 'warn');
+      else
+        say('Falling back to the textbook window. Expect to trim on the way out.', 'warn');
+    }
+    return;
+  }
+
+  if (sub === 'RDV' || sub === 'RENDEZVOUS') {
+    const o = S.objects.find(x => x.id === 'STATION' && x.soi === S.soi);
+    if (!o) return say('No station to rendezvous with here.', 'err');
+    const se = elements(o.r, o.v, mu);
+    head('RENDEZVOUS SOLUTION · STATION');
+    row('YOUR ORBIT', `${fmtDist(e.rp-b.R)} × ${fmtDist(e.ra-b.R)}   T ${fmtT(e.period)}`);
+    row('STATION ORBIT', `${fmtDist(se.rp-b.R)} × ${fmtDist(se.ra-b.R)}   T ${fmtT(se.period)}`);
+    const thC = Math.atan2(S.r.y, S.r.x), thT = Math.atan2(o.r.y, o.r.x);
+    const phi = normAngle((thT - thC) * e.dir);
+    row('PHASE ANGLE', (phi*180/Math.PI).toFixed(1) + '°  station ahead of you');
+    row('RANGE', fmtDist(V.len(V.sub(o.r, S.r))));
+    row('CLOSING', fmtVel(-V.dot(V.unit(V.sub(o.r,S.r)), V.sub(o.v,S.v))));
+
+    if (V.len(V.sub(o.r, S.r)) < 30) {
+      say('');
+      say('Inside 30 km — you are in proximity ops. Use DOCK for the approach page and TRANS to close.', 'ok');
+      return;
+    }
+    if (e.e > 0.03) {
+      say('');
+      say('Circularize first — this solution assumes a circular departure.  PLAN CIRC AP', 'warn');
+      return;
+    }
+
+    // Hohmann phasing: the station must sit exactly this far ahead at ignition
+    const r1 = e.r, r2 = se.a, at = (r1 + r2)/2;
+    const tof = Math.PI*Math.sqrt(at*at*at/mu);
+    const ws = Math.sqrt(mu/(r2*r2*r2)), wc = Math.sqrt(mu/(r1*r1*r1));
+    const phiReq = normAngle(Math.PI - ws*tof);
+    const rel = ws - wc;
+    let dphi = phiReq - phi;
+    dphi = rel > 0 ? normAngle(dphi) : -normAngle(-dphi);
+    const wait = Math.abs(rel) < 1e-14 ? Infinity : dphi/rel;
+    const dv1 = (Math.sqrt(mu*(2/r1 - 1/at)) - e.v)*1000;
+    const secs = burnTimeFor(Math.abs(dv1));
+
+    say('');
+    row('TRANSFER TIME', fmtT(tof));
+    row('PHASE NEEDED', (phiReq*180/Math.PI).toFixed(1) + '°  at ignition', 'key');
+    row('WINDOW IN', isFinite(wait) ? fmtT(wait) : '——', wait < 120 ? 'ok' : 'out');
+    row('ΔV', fmtDV(Math.abs(dv1)) + '  ' + (dv1 >= 0 ? 'prograde' : 'retrograde'));
+    row('BURN TIME', secs.toFixed(1) + ' s');
+    say('');
+    say(`  →  BURN ${dv1 >= 0 ? 'PRO' : 'RET'} ${secs.toFixed(2)} AT T+${wait.toFixed(2)}`, 'ok');
+    say(`  then, half an orbit later:   PLAN CIRC AP`, 'ok');
+    say('The counter-intuitive part: you catch the station by staying in the lower, faster orbit until the geometry is right — not by thrusting at it.', 'dim');
+    return;
+  }
+
+  head('PLAN — onboard maneuver solver');
+  say('PLAN CIRC AP|PE      circularize at an apsis', 'out');
+  say('PLAN APO <km>        raise/lower apoapsis (burns at periapsis)', 'out');
+  say('PLAN PERI <km>       raise/lower periapsis (burns at apoapsis)', 'out');
+  say('PLAN ESC             escape the current sphere of influence', 'out');
+  say('PLAN XFER <BODY>     Hohmann transfer + launch window', 'out');
+  say('PLAN RDV             station rendezvous phasing', 'out');
+  say('Every answer ends with a BURN line you can type straight back.', 'dim');
+}
+
+function timeToSOIExit() {
+  const b = soiBody(); if (!isFinite(b.soi)) return Infinity;
+  let r = {...S.r}, v = {...S.v}, t = 0;
+  for (let i = 0; i < 400; i++) {
+    const out = propagate(r, v, b.mu, 60); r = out.r; v = out.v; t += 60;
+    if (V.len(r) > b.soi) return t;
+  }
+  return Infinity;
+}
+
+/* ============================================================
+   PROXIMITY OPS + RCS
+   ============================================================ */
+function rcsDV() {
+  const m0 = craftMass(), m1 = m0 - S.craft.rcs;
+  return m1 <= 0 ? 0 : S.craft.rcsIsp*G0*Math.log(m0/m1);
+}
+function cmdDock() {
+  const t = targetRel();
+  if (!t) return say('No target set. Try  TGT STATION.', 'err');
+  const range = V.len(t.r), rel = V.len(t.v);
+  const los = V.unit(t.r);
+  const closing = -V.dot(los, t.v);
+  const lateral = Math.abs(V.crs(los, t.v));
+  head('PROXIMITY OPS · ' + t.name);
+  row('RANGE', fmtDist(range));
+  row('REL VELOCITY', fmtVel(rel));
+  row('CLOSING RATE', fmtVel(closing) + (closing > 0 ? '  approaching' : '  opening'), closing > 0 ? 'ok' : 'warn');
+  row('LATERAL RATE', fmtVel(lateral), lateral*1000 > 1 ? 'warn' : 'ok');
+  row('RCS ΔV', fmtDV(rcsDV()) + `   ${S.craft.rcs.toFixed(2)} kg`);
+  if (range > 30) {
+    say('');
+    say('Too far for proximity ops. Match orbits first — PLAN RDV.', 'warn');
+    return;
+  }
+  say('');
+  row('CAPTURE GATE', 'range < 20 m · closing < 0.30 m/s · lateral < 0.10 m/s');
+  const eta = closing > 1e-6 ? range/closing : Infinity;
+  row('TIME TO CONTACT', fmtT(eta));
+  say('');
+  say('TRANS TGT <m/s>   thrust toward the station', 'out');
+  say('TRANS AWAY <m/s>  back off', 'out');
+  say('TRANS PORT|STBD <m/s>   kill lateral drift', 'out');
+  say('TRANS NULL        cancel all relative motion (costs the full rel-vel)', 'out');
+  say('Rule of thumb: hold closing rate near range-in-metres ÷ 100 m/s.', 'dim');
+}
+
+function cmdTrans(A) {
+  const t = targetRel();
+  const mode = A[0] || '';
+  if (mode === 'ON' || mode === 'OFF') return say('RCS is always available while propellant remains. Use TRANS to translate.', 'sys');
+  if (!t) return say('No target set. Try  TGT STATION.', 'err');
+  const los = V.unit(t.r);
+  const perp = { x:-los.y, y:los.x };
+  let dirv, dv;
+  if (mode === 'NULL') { dirv = V.unit(t.v); dv = V.len(t.v)*1000; }
+  else {
+    dv = parseFloat(A[1]);
+    if (!isFinite(dv) || dv <= 0) return say('Usage: TRANS <TGT|AWAY|PORT|STBD|PRO|RET> <m/s>', 'err');
+    switch (mode) {
+      case 'TGT': case 'FWD':  dirv = los; break;
+      case 'AWAY': case 'AFT': dirv = V.mul(los,-1); break;
+      case 'PORT': case 'LEFT':  dirv = perp; break;
+      case 'STBD': case 'RIGHT': dirv = V.mul(perp,-1); break;
+      case 'PRO': dirv = V.unit(S.v); break;
+      case 'RET': dirv = V.mul(V.unit(S.v),-1); break;
+      default: return say('Usage: TRANS <TGT|AWAY|PORT|STBD|PRO|RET|NULL> <m/s>', 'err');
+    }
+  }
+  if (dv > rcsDV()) return say(`Only ${fmtDV(rcsDV())} of RCS remains.`, 'err');
+  const m0 = craftMass();
+  const used = m0 * (1 - Math.exp(-dv/(S.craft.rcsIsp*G0)));
+  S.craft.rcs = Math.max(0, S.craft.rcs - used);
+  S.v = V.add(S.v, V.mul(dirv, dv/1000));
+  say(`RCS pulse · ${fmtDV(dv)} ${mode.toLowerCase()}  (${used.toFixed(3)} kg)`, 'key');
+  derive();
+  const nt = targetRel();
+  if (nt) say(`Range ${fmtDist(V.len(nt.r))}   closing ${fmtVel(-V.dot(V.unit(nt.r), nt.v))}`, 'out');
+  checkObjectives();
+}
+</script>
+
+<script>
+/* ============================================================
+   MISSIONS
+   ============================================================ */
+function setOrbit(soi, periAlt, apoAlt, nuDeg, argpDeg) {
+  const b = BODIES[soi];
+  const rp = b.R + periAlt, ra = b.R + apoAlt;
+  const a = (rp+ra)/2, ecc = (ra-rp)/(ra+rp);
+  const p = a*(1-ecc*ecc);
+  const nu = (nuDeg||0)*Math.PI/180, argp = (argpDeg||0)*Math.PI/180;
+  const r = p/(1+ecc*Math.cos(nu)), th = argp + nu;
+  const h = Math.sqrt(b.mu*p);
+  const rhat = {x:Math.cos(th), y:Math.sin(th)};
+  const that = {x:-Math.sin(th), y:Math.cos(th)};
+  S.soi = soi;
+  S.r = V.mul(rhat, r);
+  S.v = V.add(V.mul(rhat, b.mu/h*ecc*Math.sin(nu)), V.mul(that, h/r));
+}
+function setHelio(periAU, apoAU, nuDeg, argpDeg) {
+  setOrbit('SUN', periAU*AU - BODIES.SUN.R, apoAU*AU - BODIES.SUN.R, nuDeg, argpDeg);
+}
+function makeStation(soi, altKm, phaseDeg) {
+  const b = BODIES[soi], r = b.R + altKm, th = phaseDeg*Math.PI/180;
+  const sp = Math.sqrt(b.mu/r);
+  return { id:'STATION', soi, r:{x:r*Math.cos(th), y:r*Math.sin(th)},
+           v:{x:-sp*Math.sin(th), y:sp*Math.cos(th)} };
+}
+function rig(o) {
+  Object.assign(S.craft, { name:'—', dry:2200, fuel:0, fuelMax:0, thrust:30, isp:311,
+                           rcs:0, rcsMax:0, rcsIsp:220, crew:0, o2:0 }, o);
+  S.craft.fuelMax = o.fuel; S.craft.rcsMax = o.rcs || 0;
+}
+
+const MISSIONS = [
+{
+  id:1, code:'M-01', name:'ORBITAL INSERTION',
+  brief:[
+    'Second stage has shut down at {182 km}. You are on a ballistic arc: apoapsis {400 km}, periapsis 900 km below the surface.',
+    'Left alone this vehicle comes straight back down. Orbit is not about going up — it is about going sideways fast enough that the ground curves away beneath you.',
+    'Coast to apoapsis, then burn {prograde} to lift periapsis out of the planet.'],
+  hint:'Try:  PLAN CIRC AP',
+  setup(){ rig({name:'AURIGA-1', dry:2200, fuel:1800, thrust:30, isp:311, rcs:20});
+    setOrbit('EARTH', -900, 400, 136, 30);
+    S.power.battMax = 600; S.power.batt = 540; S.power.area = 14; },
+  obj:[
+    { text:'Raise periapsis above 150 km', check:(s,d)=> d.perAlt > 150 },
+    { text:'Settle into a near-circular orbit (e < 0.05)', check:(s,d)=> d.e.e < 0.05 && d.perAlt > 150 },
+  ]
+},
+{
+  id:2, code:'M-02', name:'HIGH GROUND',
+  brief:[
+    'You are parked in a {200 km} circular orbit. Mission wants you at {1000 km}.',
+    'A single long burn will not do it cleanly. The efficient move is a {Hohmann transfer}: burn prograde once to stretch apoapsis up to the target altitude, coast a half-orbit, then burn prograde again at apoapsis to pull periapsis up behind it.',
+    'Two burns, half an orbit apart. Budget is tight — {around 440 m/s} if you fly it well.'],
+  hint:'Try:  PLAN APO 1000',
+  setup(){ rig({name:'AURIGA-2', dry:2400, fuel:800, thrust:24, isp:311, rcs:20});
+    setOrbit('EARTH', 200, 200, 0, 0);
+    S.power.battMax = 600; S.power.batt = 600; S.power.area = 14; },
+  obj:[
+    { text:'Stretch apoapsis to 1000 km', check:(s,d)=> d.apoAlt > 950 && d.apoAlt < 1150 },
+    { text:'Circularize there (periapsis above 950 km)', check:(s,d)=> d.perAlt > 950 && d.e.e < 0.03 },
+  ]
+},
+{
+  id:3, code:'M-03', name:'RENDEZVOUS & DOCK',
+  brief:[
+    'Station {CERES} holds a circular orbit at {400 km}. You are 100 km below it and trailing.',
+    'Chasing directly does not work: thrusting toward the station raises your orbit, which {slows you down}. A lower orbit is a faster orbit — so you catch up by staying low, then climb once the phase angle is right.',
+    'Close to within 20 m at under 0.30 m/s to capture. Your RCS holds about {22 m/s} — spend it carefully.'],
+  hint:'Try:  TGT STATION  then  PLAN RDV',
+  setup(){ rig({name:'AURIGA-3', dry:2600, fuel:700, thrust:18, isp:311, rcs:40, rcsIsp:220, crew:2, o2:520});
+    setOrbit('EARTH', 300, 300, 0, 0);
+    S.objects = [ makeStation('EARTH', 400, 25) ];
+    S.target = 'STATION';
+    S.power.battMax = 900; S.power.batt = 900; S.power.area = 18; },
+  obj:[
+    { text:'Match orbits — range under 30 km', check:(s,d)=>{ const t=targetRel(); return t && V.len(t.r) < 30; } },
+    { text:'Soft capture — 20 m at under 0.30 m/s', check:(s,d)=>{ const t=targetRel(); if(!t) return false;
+        const rg=V.len(t.r)*1000, rel=V.len(t.v)*1000;
+        const lat=Math.abs(V.crs(V.unit(t.r),t.v))*1000;
+        return rg < 20 && rel < 0.30 && lat < 0.10; } },
+  ]
+},
+{
+  id:4, code:'M-04', name:'LUNAR FLYBY',
+  brief:[
+    'From a {200 km} parking orbit, send this vehicle past the Moon and bring it home.',
+    'Translunar injection is a prograde burn at the right moment — you are not aiming at where the Moon is, you are aiming at where it will be in about three days.',
+    'Cross into the Moon\'s sphere of influence, then let its gravity bend you back toward Earth.'],
+  hint:'Try:  PLAN XFER MOON',
+  setup(){ rig({name:'SELENE-1', dry:3400, fuel:8600, thrust:90, isp:315, rcs:30});
+    setOrbit('EARTH', 200, 200, 0, 200);
+    S.power.battMax = 1400; S.power.batt = 1400; S.power.area = 22; },
+  obj:[
+    { text:'Reach the Moon — enter lunar sphere of influence', check:(s)=> s.soi === 'MOON' },
+    { text:'Return to Earth reference after the flyby', check:(s)=> s.soi === 'EARTH' && s.flags.lunarSOI },
+  ]
+},
+{
+  id:5, code:'M-05', name:'LUNAR ORBIT',
+  brief:[
+    'Same transfer as the flyby, but this time you stay.',
+    'Arriving inside the Moon\'s sphere of influence you will be on a {hyperbolic} pass — faster than lunar escape velocity. Burn {retrograde} near closest approach to bleed off enough speed for the Moon to keep you.',
+    'That is lunar orbit insertion. Miss it and you sail straight back out.'],
+  hint:'Try:  PLAN XFER MOON  — then once captured,  PLAN CIRC PE',
+  setup(){ rig({name:'SELENE-2', dry:3600, fuel:16000, thrust:110, isp:315, rcs:30, crew:3, o2:900});
+    setOrbit('EARTH', 200, 200, 0, 200);
+    S.power.battMax = 1800; S.power.batt = 1800; S.power.area = 26; },
+  obj:[
+    { text:'Enter the Moon\'s sphere of influence', check:(s)=> s.soi === 'MOON' },
+    { text:'Capture into lunar orbit (closed, periapsis above 20 km)',
+      check:(s,d)=> s.soi === 'MOON' && d.e.e < 1 && d.perAlt > 20 && d.apoAlt < 4000 },
+  ]
+},
+{
+  id:6, code:'M-06', name:'TRANQUILLITY',
+  brief:[
+    'You are in a {100 km} circular orbit of the Moon with a lander beneath you. No atmosphere, no parachutes — every metre per second comes off the engine.',
+    'Drop periapsis to about {15 km}, coast down to it, then hold {retrograde} to kill your 1.7 km/s of horizontal speed. Go lower than that first and you will not have the altitude to arrest the fall.',
+    'As horizontal speed dies the retrograde vector swings upward on its own, and the same command becomes your brake. Below 60 km the console swaps the apsis readouts for {descent rate} and {lateral drift} — those are the two numbers that matter now.',
+    'Touchdown needs under {4 m/s} vertical and {3 m/s} lateral. Landing mode is armed. Budget about {2,100 m/s}.'],
+  hint:'Try:  PLAN PERI 15  — then at periapsis, BURN RET 400 and watch the descent rate',
+  setup(){ rig({name:'EAGLE', dry:2100, fuel:4200, thrust:45, isp:311, rcs:30, crew:2, o2:300});
+    setOrbit('MOON', 100, 100, 0, 0);
+    S.landingAllowed = true;
+    S.power.battMax = 1200; S.power.batt = 1200; S.power.area = 12; },
+  obj:[
+    { text:'Bring periapsis down toward the surface', check:(s,d)=> s.soi==='MOON' && d.perAlt < 20 },
+    { text:'Land intact', check:(s)=> s.status === 'landed' },
+  ]
+},
+{
+  id:7, code:'M-07', name:'OUTBOUND',
+  brief:[
+    'Leave Earth entirely.',
+    'Escape velocity at your altitude is {1.414×} circular velocity — but where you spend the propellant matters. Burning at periapsis, where you are already moving fastest, converts more of it into leftover speed. That is the {Oberth effect}, and it is free.',
+    'Push past escape and you stop orbiting Earth. You start orbiting the Sun.'],
+  hint:'Try:  PLAN ESC',
+  setup(){ rig({name:'PIONEER-VII', dry:2800, fuel:6200, thrust:36, isp:318, rcs:20});
+    setOrbit('EARTH', 200, 200, 0, 0);
+    S.power.battMax = 1600; S.power.batt = 1600; S.power.area = 30; },
+  obj:[
+    { text:'Throw apoapsis past the Moon\'s orbit', check:(s,d)=> s.soi==='EARTH' && (d.e.e >= 1 || d.e.ra > BODIES.MOON.a) },
+    { text:'Cross into solar orbit', check:(s)=> s.soi === 'SUN' },
+  ]
+},
+{
+  id:8, code:'M-08', name:'RED PLANET',
+  brief:[
+    'You are already in solar orbit at Earth\'s distance, {1 AU} from the Sun. Mars sits at 1.52 AU.',
+    'This is the same Hohmann transfer you flew to the Moon, scaled up by a factor of four hundred. The flight takes about {259 days}, and the window only opens when Mars is roughly {44° ahead} of you.',
+    'Wind the clock forward, take the window, then capture at the far end.'],
+  hint:'Try:  PLAN XFER MARS  — then WARP 1000000 and watch PHASE NOW',
+  setup(){ rig({name:'ARES-1', dry:3200, fuel:22000, thrust:60, isp:326, rcs:40});
+    setHelio(1.0, 1.0, 0, 180.0);
+    S.target = 'MARS';
+    S.power.battMax = 2000; S.power.batt = 2000; S.power.area = 40; },
+  obj:[
+    { text:'Raise aphelion to Mars\' orbit', check:(s,d)=> s.soi==='SUN' && d.e.ra > BODIES.MARS.a*0.97 },
+    { text:'Enter Mars\' sphere of influence', check:(s)=> s.soi === 'MARS' },
+    { text:'Capture into Mars orbit', check:(s,d)=> s.soi==='MARS' && d.e.e < 1 && d.perAlt > 150 },
+  ]
+},
+{
+  id:9, code:'M-09', name:'SUNDIVE',
+  brief:[
+    'A solar probe falling in toward the Sun. Perihelion is currently {0.18 AU} — and this instrument bus fails at {180 °C}.',
+    'Heat scales with the inverse square of solar distance. At 0.18 AU the bus settles near {225 °C} and the vehicle is lost. You have about 87 days before you get there.',
+    'You are near aphelion, which is exactly where a periapsis change is cheapest. Raise perihelion above {0.24 AU} — that brings you in near 155 °C, with margin.'],
+  hint:'Try:  PLAN PERI  with the target in km — 0.24 AU is 35,903,489 km',
+  setup(){ rig({name:'HELIOS-4', dry:1400, fuel:2600, thrust:12, isp:318, rcs:20});
+    setHelio(0.18, 0.90, 170, 0);
+    S.thermLimit = 180;
+    S.power.battMax = 800; S.power.batt = 800; S.power.area = 8; },
+  obj:[
+    { text:'Raise perihelion above 0.24 AU', check:(s,d)=> s.soi==='SUN' && d.e.rp > 0.24*AU },
+    { text:'Survive perihelion passage', check:(s,d)=> s.soi==='SUN' && s.flags.perihelionPassed && s.therm.hull < 180 },
+  ]
+},
+{
+  id:0, code:'FREE', name:'FREE FLIGHT',
+  brief:[
+    'No objectives. Full tanks, {200 km} Earth orbit, the Moon three days away and the whole system open.',
+    'Everything the missions teach works here. PLAN will solve any maneuver you ask it for.'],
+  hint:'Try:  PLAN XFER MOON  ·  PLAN ESC  ·  TGT MARS',
+  setup(){ rig({name:'TESTBED', dry:2500, fuel:20000, thrust:60, isp:340, rcs:200, crew:1, o2:9000});
+    setOrbit('EARTH', 200, 200, 0, 0);
+    S.power.battMax = 4000; S.power.batt = 4000; S.power.area = 60; },
+  obj:[]
+},
+];
+
+function loadMission(id) {
+  const m = MISSIONS.find(x => x.id === id);
+  if (!m) return say('No such mission.', 'err');
+  S.t = 0; S.warp = 0; S.burn = null; S.sched = null; S.objects = [];
+  S.target = null; S.status = 'flight'; S.att = 'PRO';
+  S.completed = false; S.pauseAfterBurn = false;
+  S.landingAllowed = false; S.thermLimit = 800;
+  S.therm.hull = 20; S.ledger = { dvUsed:0, burns:0 };
+  S.loads = { HEAT:true, SCI:false, COMM:true };
+  S.flags = { lunarSOI:false, perihelionPassed:false };
+  S.warnedPower = S.warnedTherm = S.warnedAtmo = false;
+  m.setup();
+  S.mission = m;
+  S.objectives = m.obj.map(o => ({ ...o, done:false }));
+  derive(); fitView();
+  logEl.innerHTML = '';
+  head(`${m.code} · ${m.name}`);
+  m.brief.forEach(b => { say(b, 'out'); say(''); });
+  if (S.objectives.length) {
+    say('OBJECTIVES', 'hd');
+    S.objectives.forEach((o,i) => say(`  ${i+1}. ${o.text}`, 'out'));
+  }
+  say('');
+  say(m.hint || '', 'ok');
+  say('Clock is HOLD. Type  WARP 10  to start time, or  STAT  for the flight display.', 'sys');
+  saveProgress();
+}
+
+/* ---- objectives -------------------------------------------- */
+function checkObjectives() {
+  if (S.status === 'lost' || S.completed || !S.objectives.length) return;
+  if (S.soi === 'MOON') S.flags.lunarSOI = true;
+  if (S.soi === 'SUN' && D.e && D.e.r < D.e.rp*1.02 && D.e.e > 0.05) S.flags.perihelionPassed = true;
+  let changed = false;
+  for (const o of S.objectives) {
+    if (o.done) continue;
+    let ok = false;
+    try { ok = !!o.check(S, D); } catch (err) { ok = false; }
+    if (ok) { o.done = true; changed = true; say(`OBJECTIVE COMPLETE · ${o.text}`, 'ok'); }
+  }
+  if (changed && S.objectives.every(o => o.done) && !S.completed) {
+    S.completed = true;
+    // let a running burn finish — cutting the engine here would strand the vehicle
+    // mid-maneuver on the very burn that met the objective
+    if (S.burn) S.pauseAfterBurn = true; else S.warp = 0;
+    say('', 'out');
+    head('MISSION COMPLETE · ' + S.mission.code);
+    row('ELAPSED', fmtMET(S.t));
+    row('ΔV EXPENDED', fmtDV(S.ledger.dvUsed));
+    row('BURNS', String(S.ledger.burns));
+    row('PROP REMAINING', S.craft.fuel.toFixed(1) + ' kg');
+    say('');
+    const nxt = MISSIONS.find(m => m.id === S.mission.id + 1);
+    say(nxt ? `Next up: ${nxt.code} ${nxt.name}.  Type  MIS ${nxt.id}` : 'Every scripted mission is flown. Type MIS 0 for free flight.', 'sys');
+    markComplete(S.mission.id);
+  }
+}
+function cmdObj() {
+  if (!S.mission) return say('No mission loaded. Type MIS.', 'err');
+  head(S.mission.code + ' · OBJECTIVES');
+  if (!S.objectives.length) return say('Free flight — no objectives.', 'sys');
+  S.objectives.forEach((o,i) => say(`  ${o.done ? '✔' : '○'}  ${i+1}. ${o.text}`, o.done ? 'ok' : 'out'));
+  say('');
+  say(S.mission.hint || '', 'dim');
+}
+function cmdMis(A) {
+  if (A[0] !== undefined && A[0] !== '') {
+    const n = parseInt(A[0], 10);
+    if (!isNaN(n) && MISSIONS.some(m => m.id === n)) return loadMission(n);
+    return say('Usage: MIS <number>. Type MIS on its own for the list.', 'err');
+  }
+  head('MISSION ROSTER');
+  const done = loadProgress();
+  for (const m of MISSIONS) {
+    const mark = done.includes(m.id) ? '✔' : ' ';
+    const cur = S.mission && S.mission.id === m.id ? ' ◂ loaded' : '';
+    say(`  ${mark} ${pad('MIS ' + m.id, 8)}${pad(m.code, 7)}${m.name}${cur}`,
+        done.includes(m.id) ? 'ok' : 'out');
+  }
+  say('');
+  say('Type  MIS 1  to fly one. They build on each other, so fly them in order.', 'sys');
+}
+</script>
+
+<script>
+/* ============================================================
+   HELP
+   ============================================================ */
+function cmdHelp(topic) {
+  if (topic === 'ORBIT' || topic === 'PHYSICS') {
+    head('HOW ORBITS BEHAVE');
+    say('An orbit is an ellipse with the planet at one focus. Two numbers describe its size and shape: {apoapsis} (the high point) and {periapsis} (the low point).');
+    say('');
+    say('The one rule worth memorising: {a burn changes the far side of your orbit, not where you are}.', 'key');
+    say('  · Burn PRO at periapsis → apoapsis rises', 'out');
+    say('  · Burn RET at periapsis → apoapsis falls', 'out');
+    say('  · Burn PRO at apoapsis  → periapsis rises', 'out');
+    say('  · Burn RET at apoapsis  → periapsis falls', 'out');
+    say('');
+    say('So circularizing means burning prograde at apoapsis until periapsis catches up. Raising your orbit takes two burns half an orbit apart — a Hohmann transfer.');
+    say('');
+    say('The counter-intuitive one: to catch something ahead of you in the same orbit, burn {retrograde}. You drop into a lower, faster orbit and gain on it. Thrusting toward it would raise you and slow you down.', 'warn');
+    return;
+  }
+  if (topic === 'BURN') {
+    head('BURNS');
+    say('BURN <DIR> <SECONDS> [AT PE|AP|T+<s>]');
+    say('  PRO   prograde — along your velocity, raises the opposite apsis', 'out');
+    say('  RET   retrograde — against velocity, lowers the opposite apsis', 'out');
+    say('  ROUT  radial out — away from the planet, rotates the orbit', 'out');
+    say('  RIN   radial in — toward the planet', 'out');
+    say('');
+    say('BURN PRO 42            light the engine now for 42 seconds', 'out');
+    say('BURN PRO 42 AT AP      arm it for the next apoapsis', 'out');
+    say('BURN RET 15 AT T+600   arm it for ten minutes from now', 'out');
+    say('BURN PRO 250 AT XFER MOON   arm it for the next transfer window', 'out');
+    say('CANCEL                 shut down or disarm', 'out');
+    say('');
+    say('An armed burn ignites {half its duration early} so the impulse is centred on the node — that is how it is actually flown.', 'dim');
+    say('Time warp drops to 10× automatically while the engine is lit.', 'dim');
+    return;
+  }
+  if (topic === 'DOCK') {
+    head('RENDEZVOUS & DOCKING');
+    say('1. TGT STATION — set the target.');
+    say('2. PLAN RDV — read the phase angle and orbit difference.');
+    say('3. Stay in a lower orbit until the phase angle closes toward 0°.');
+    say('4. Match the station\'s orbit: PLAN APO <its altitude>, then PLAN CIRC AP.');
+    say('5. Inside 30 km the scope switches to proximity ops. Use DOCK for the approach page.');
+    say('6. TRANS TGT / AWAY / PORT / STBD in tenths of a metre per second.');
+    say('');
+    say('Capture gate: {under 20 m, closing under 0.30 m/s, lateral under 0.10 m/s}.', 'key');
+    say('TRANS NULL cancels all relative motion in one pulse — expensive but it saves a bad approach.', 'dim');
+    return;
+  }
+  head('COMMAND REFERENCE');
+  say('FLIGHT', 'hd');
+  say(pad('STAT',22) + 'primary flight display', 'out');
+  say(pad('NAV',22) + 'full orbital elements', 'out');
+  say(pad('BURN <DIR> <SEC>',22) + 'light the engine  (HELP BURN)', 'out');
+  say(pad('HOLD <DIR>',22) + 'set attitude hold', 'out');
+  say(pad('CANCEL',22) + 'abort or disarm a burn', 'out');
+  say(pad('WARP <n>',22) + 'time warp — 0 holds the clock', 'out');
+  say(pad('TGT <BODY|STATION>',22) + 'set a target', 'out');
+  say('PLANNING', 'hd');
+  say(pad('PLAN',22) + 'the maneuver solver — start here', 'key');
+  say(pad('PLAN CIRC AP|PE',22) + 'circularize at an apsis', 'out');
+  say(pad('PLAN APO <km>',22) + 'raise or lower apoapsis', 'out');
+  say(pad('PLAN PERI <km>',22) + 'raise or lower periapsis', 'out');
+  say(pad('PLAN XFER <BODY>',22) + 'transfer + launch window', 'out');
+  say(pad('PLAN ESC',22) + 'escape this sphere of influence', 'out');
+  say(pad('PLAN RDV',22) + 'station phasing', 'out');
+  say('SUBSYSTEMS', 'hd');
+  say(pad('PWR',22) + 'electrical — arrays, battery, loads', 'out');
+  say(pad('FUEL',22) + 'propellant and ΔV budget', 'out');
+  say(pad('THERM',22) + 'hull temperature', 'out');
+  say(pad('COMM',22) + 'range and signal delay', 'out');
+  say(pad('LIFE',22) + 'crew and consumables', 'out');
+  say(pad('DOCK · TRANS',22) + 'proximity ops  (HELP DOCK)', 'out');
+  say('MISSION', 'hd');
+  say(pad('MIS',22) + 'mission roster', 'out');
+  say(pad('LOG',22) + 'objective status', 'out');
+  say(pad('RESTART',22) + 'refly the current mission', 'out');
+  say(pad('CLS',22) + 'clear the scratchpad', 'out');
+  say('');
+  say('HELP ORBIT   why burns do what they do — read this one', 'key');
+  say('HELP BURN · HELP DOCK', 'dim');
+}
+
+/* ============================================================
+   PERSISTENCE
+   ============================================================ */
+const KEY = 'deltav.progress.v1';
+function loadProgress() {
+  try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { return []; }
+}
+function markComplete(id) {
+  try {
+    const d = loadProgress();
+    if (!d.includes(id)) { d.push(id); localStorage.setItem(KEY, JSON.stringify(d)); }
+  } catch (e) { /* private browsing — progress is just not remembered */ }
+}
+function saveProgress() { /* roster state only; flight state is not resumed across loads */ }
+
+/* ============================================================
+   QUICK CHIPS
+   ============================================================ */
+const CHIPS = [
+  ['STAT','STAT'], ['NAV','NAV'], ['PLAN','PLAN'], ['W×10','WARP 10'], ['W×100','WARP 100'],
+  ['W×1k','WARP 1000'], ['HOLD','WARP 0'], ['PWR','PWR'], ['FUEL','FUEL'], ['LOG','LOG'],
+  ['MIS','MIS'], ['HELP','HELP'],
+];
+const chipBar = document.getElementById('chips');
+for (const [label, cmd] of CHIPS) {
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'chip'; b.textContent = label;
+  if (cmd === 'PLAN' || cmd === 'HELP') b.classList.add('hot');
+  b.addEventListener('click', () => { exec(cmd); document.getElementById('cmd').focus({preventScroll:true}); });
+  chipBar.appendChild(b);
+}
+
+/* ============================================================
+   INPUT
+   ============================================================ */
+const input = document.getElementById('cmd');
+const history = []; let hIx = -1;
+document.getElementById('entry').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const v = input.value;
+  if (!v.trim()) return;
+  history.push(v); hIx = history.length;
+  input.value = '';
+  try { exec(v); } catch (err) { say('Console fault: ' + err.message, 'err'); }
+  derive(); updateHUD();
+});
+input.addEventListener('keydown', (ev) => {
+  if (ev.key === 'ArrowUp')   { ev.preventDefault(); if (hIx > 0) input.value = history[--hIx]; }
+  if (ev.key === 'ArrowDown') { ev.preventDefault();
+    if (hIx < history.length-1) input.value = history[++hIx]; else { hIx = history.length; input.value = ''; } }
+});
+document.getElementById('z-in').addEventListener('click',  () => { view.km /= 1.6; view.auto = false; });
+document.getElementById('z-out').addEventListener('click', () => { view.km *= 1.6; view.auto = false; });
+document.getElementById('z-fit').addEventListener('click', () => fitView());
+
+/* ============================================================
+   MAIN LOOP
+   ============================================================ */
+let last = 0;
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (!last) last = ts;
+  const dtReal = Math.min((ts - last)/1000, 0.1);
+  last = ts;
+  if (S.status === 'flight' && S.warp > 0) advance(dtReal * S.warp);
+  derive();
+  updateHUD();
+  draw();
+}
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+function boot(restored) {
+  document.getElementById('veil').classList.add('hidden');
+  resize();
+  if (!S.mission) {
+    loadMission(1);
+    const done = loadProgress();
+    if (done.length) say(`Flight record found — ${done.length} mission${done.length>1?'s':''} already flown. Type MIS for the roster.`, 'sys');
+  }
+  requestAnimationFrame(frame);
+  if (window.matchMedia('(min-width: 860px)').matches) input.focus({preventScroll:true});
+}
+document.getElementById('boot').addEventListener('click', () => boot());
+
+/* keep open viewers' flight state across a republish */
+try {
+  window.claude?.hot?.snapshot?.(() => ({
+    t:S.t, soi:S.soi, r:S.r, v:S.v, mission:S.mission?.id, craft:S.craft,
+    power:S.power, therm:S.therm, objectives:S.objectives.map(o=>o.done), booted:!document.getElementById('veil').classList.contains('hidden'),
+  }));
+} catch (e) {}
+
+resize();
+derive();
+updateHUD();
+draw();
+</script>
