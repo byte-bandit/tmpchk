@@ -103,10 +103,9 @@ body{
 
 /* ---------- readout grid ---------- */
 .readout{
-  display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--rule-soft);
+  display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule-soft);
   border:1px solid var(--rule);flex:0 0 auto;
 }
-@media (min-width:520px){.readout{grid-template-columns:repeat(6,1fr)}}
 .ro{background:var(--panel);padding:6px 8px 7px;min-width:0}
 .ro-k{font-family:var(--f-disp);font-size:8.5px;letter-spacing:.13em;color:var(--slate-dim);text-transform:uppercase}
   .ro-v{font-size:13.5px;font-weight:700;color:var(--amber);font-variant-numeric:tabular-nums;
@@ -151,14 +150,15 @@ body{
 
 /* ---------- chips ---------- */
 .chips{
-  display:flex;gap:4px;overflow-x:auto;padding:5px 7px;flex:0 0 auto;
-  border-top:1px solid var(--rule-soft);scrollbar-width:none;
+  display:grid;grid-template-columns:repeat(6,1fr);gap:4px;padding:5px 7px;flex:0 0 auto;
+  border-top:1px solid var(--rule-soft);
 }
-.chips::-webkit-scrollbar{display:none}
 .chip{
-  flex:0 0 auto;background:#111925;border:1px solid var(--rule);color:var(--slate);
-  font-family:var(--f-disp);font-size:10.5px;font-weight:600;letter-spacing:.09em;
-  padding:5px 9px;border-radius:2px;cursor:pointer;white-space:nowrap;
+  min-width:0;background:#111925;border:1px solid var(--rule);color:var(--slate);
+  font-family:var(--f-disp);font-size:10px;font-weight:600;letter-spacing:.06em;
+  padding:6px 3px;border-radius:2px;cursor:pointer;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;text-align:center;
+  -webkit-tap-highlight-color:transparent;
 }
 .chip:active,.chip:focus-visible{background:#1B2534;color:var(--amber);border-color:var(--amber-dim);outline:none}
 .chip.hot{color:var(--amber);border-color:var(--amber-dim)}
@@ -222,11 +222,13 @@ button:focus-visible,input:focus-visible{outline:1px solid var(--amber);outline-
         <div class="scope-scale" id="scope-scale">—</div>
       </div>
       <div class="readout" id="readout">
-        <div class="ro"><div class="ro-k">Altitude</div><div class="ro-v" id="d-alt">—</div></div>
-        <div class="ro"><div class="ro-k">Velocity</div><div class="ro-v" id="d-vel">—</div></div>
-        <div class="ro"><div class="ro-k" id="k-apo">Apoapsis</div><div class="ro-v" id="d-apo">—</div></div>
-        <div class="ro"><div class="ro-k" id="k-per">Periapsis</div><div class="ro-v" id="d-per">—</div></div>
-        <div class="ro"><div class="ro-k">Eccentricity</div><div class="ro-v" id="d-ecc">—</div></div>
+        <div class="ro"><div class="ro-k">Alt</div><div class="ro-v" id="d-alt">—</div></div>
+        <div class="ro"><div class="ro-k">Vel</div><div class="ro-v" id="d-vel">—</div></div>
+        <div class="ro"><div class="ro-k" id="k-apo">Apo</div><div class="ro-v" id="d-apo">—</div></div>
+        <div class="ro"><div class="ro-k" id="k-tapo">T−Apo</div><div class="ro-v" id="d-tapo">—</div></div>
+        <div class="ro"><div class="ro-k" id="k-per">Peri</div><div class="ro-v" id="d-per">—</div></div>
+        <div class="ro"><div class="ro-k" id="k-tper">T−Peri</div><div class="ro-v" id="d-tper">—</div></div>
+        <div class="ro"><div class="ro-k">Ecc</div><div class="ro-v" id="d-ecc">—</div></div>
         <div class="ro"><div class="ro-k">Period</div><div class="ro-v" id="d-prd">—</div></div>
       </div>
     </div>
@@ -249,7 +251,7 @@ button:focus-visible,input:focus-visible{outline:1px solid var(--amber);outline-
 
 <div id="veil">
   <h1>DELTA-V</h1>
-  <p>Flight console for orbital operations. Real two-body mechanics — your burns move apoapsis and periapsis the way they actually would.</p>
+  <p>Orbital flight console. Patched-conic guidance, navigation and control.</p>
   <button id="boot" type="button">POWER ON</button>
 </div>
 
@@ -565,7 +567,7 @@ function endBurn(msg, cls) {
   S.ledger.burns++;
   say(msg + ` · ${spent.toFixed(1)} s`, cls || 'ok');
   if (S.warp !== S.preBurnWarp && S.preBurnWarp) { S.warp = S.preBurnWarp; S.preBurnWarp = null; }
-  if (S.pauseAfterBurn) { S.warp = 0; S.pauseAfterBurn = false; say('Clock held. Type MIS for the roster.', 'sys'); }
+  if (S.pauseAfterBurn) { S.warp = 0; S.pauseAfterBurn = false; say('CLOCK HOLD', 'sys'); }
 }
 
 /* ---- sphere-of-influence patching -------------------------- */
@@ -681,7 +683,7 @@ function checkHazards() {
 function loseMission(msg) {
   S.status = 'lost'; S.warp = 0; S.burn = null; S.sched = null;
   say(msg, 'err');
-  say('Type  MIS  to pick a mission, or  RESTART  to fly this one again.', 'sys');
+  row('AVAILABLE', 'RESTART · MIS', 'sys');
   return true;
 }
 
@@ -997,24 +999,29 @@ function updateHUD() {
   set('d-vel', Math.abs(d.e.v) < 1 ? (d.e.v*1000).toFixed(0)+' m/s' : d.e.v.toFixed(2)+' km/s');
   // Below 60 km on a landing, apsides stop meaning anything and the two numbers
   // that decide whether you survive are descent rate and lateral drift.
+  // Below 60 km on a landing, apoapsis and its countdown stop meaning anything;
+  // descent rate and lateral drift are what decide whether you survive.
   const descent = S.landingAllowed && d.alt < 60 && S.status === 'flight';
   const vspd = -d.e.vr, hspd = Math.abs(V.crs(V.unit(S.r), S.v));
-  set('k-apo', descent ? 'Descent rate' : 'Apoapsis');
-  set('k-per', descent ? 'Lateral drift' : 'Periapsis');
-  set('d-apo', descent ? fmtVel(vspd) : (d.escape ? 'ESCAPE' : fmtDist(d.apoAlt)));
-  set('d-per', descent ? fmtVel(hspd) : fmtDist(d.perAlt));
+  set('k-apo',  descent ? 'V-Speed' : 'Apo');
+  set('d-apo',  descent ? fmtVel(vspd) : (d.escape ? 'ESCAPE' : fmtDist(d.apoAlt)));
+  set('k-tapo', descent ? 'Lateral' : 'T−Apo');
+  set('d-tapo', descent ? fmtVel(hspd) : (isFinite(d.tApo) ? fmtT(d.tApo) : '——'));
+  set('d-per',  fmtDist(d.perAlt));
+  set('d-tper', isFinite(d.tPeri) ? fmtT(d.tPeri) : '——');
   set('d-ecc', (d.e.e).toFixed(4));
   set('d-prd', d.e.period === Infinity ? '——' : fmtT(d.e.period));
 
-  const apoRO = document.getElementById('d-apo').parentElement;
-  const perRO = document.getElementById('d-per').parentElement;
+  const apoRO  = document.getElementById('d-apo').parentElement;
+  const tapoRO = document.getElementById('d-tapo').parentElement;
+  const perRO  = document.getElementById('d-per').parentElement;
   if (descent) {
-    apoRO.className = 'ro' + (vspd*1000 > 12 ? ' bad' : vspd*1000 > 4 ? ' warn' : '');
-    perRO.className = 'ro' + (hspd*1000 > 8 ? ' bad' : hspd*1000 > 3 ? ' warn' : '');
+    apoRO.className  = 'ro' + (vspd*1000 > 12 ? ' bad' : vspd*1000 > 4 ? ' warn' : '');
+    tapoRO.className = 'ro' + (hspd*1000 > 8 ? ' bad' : hspd*1000 > 3 ? ' warn' : '');
   } else {
-    apoRO.className = 'ro';
-    perRO.className = 'ro' + (d.perAlt < 0 ? ' bad' : (b.atmo && d.perAlt < b.atmo ? ' warn' : ''));
+    apoRO.className = 'ro'; tapoRO.className = 'ro';
   }
+  perRO.className = 'ro' + (d.perAlt < 0 ? ' bad' : (b.atmo && d.perAlt < b.atmo ? ' warn' : ''));
 
   const lamp = document.getElementById('r-lamp');
   let txt = 'NOMINAL', cls = 'ok';
@@ -1176,7 +1183,7 @@ function exec(raw) {
   case 'MIS': case 'MISSION': case 'MISSIONS': return cmdMis(A);
   case 'LOG': case 'OBJ': return cmdObj();
   case 'RESTART': case 'RESET': {
-    if (!S.mission) return say('No mission loaded. Type MIS.', 'err');
+    if (!S.mission) return say('NO MISSION LOADED', 'err');
     return loadMission(S.mission.id);
   }
   case 'CLS': case 'CLEAR': { logEl.innerHTML = ''; return; }
@@ -1279,7 +1286,7 @@ function cmdComm() {
   row('SIGNAL', S.loads.COMM ? (sig > 1 ? 'STRONG' : sig > 0.02 ? 'USABLE' : 'MARGINAL') : 'TRANSMITTER OFF',
       S.loads.COMM ? 'ok' : 'warn');
   row('DATA RATE', S.loads.COMM ? Math.max(0.1, Math.min(2048, sig*40)).toFixed(1) + ' kbps' : '—');
-  if (D.lightTime > 1) say(`At this range every instruction takes ${fmtT(D.lightTime)} to arrive. Real crews plan around it; here the console still responds instantly.`, 'dim');
+  if (D.lightTime > 1) say(`Command uplink latency at this range: ${fmtT(D.lightTime)} one way.`, 'dim');
 }
 function cmdTherm() {
   head('THERMAL');
@@ -1317,7 +1324,7 @@ function quoteBurn(dv, whereLabel, tt, solved) {
     secs = solved.dur;
     row('BURN TIME', secs.toFixed(1) + ' s at full throttle');
     if (secs > impulsive * 1.03)
-      say(`Solved by flying the burn: ${(secs - impulsive).toFixed(1)} s longer than the impulsive figure, because the vehicle keeps moving while the engine runs.`, 'dim');
+      say(`Solved by integration: ${(secs - impulsive).toFixed(1)} s longer than the impulsive figure.`, 'dim');
   } else if (solved && solved.dur == null && solved.short) {
     if (Math.abs(dv) > dvRemaining()) {
       row('BURN TIME', 'not achievable — not enough propellant', 'err');
@@ -1330,7 +1337,7 @@ function quoteBurn(dv, whereLabel, tt, solved) {
   } else {
     row('BURN TIME', secs.toFixed(1) + ' s at full throttle');
   }
-  if (secs > 90) say('Long burn — time warp drops to 10× while the engine is lit.', 'dim');
+  if (secs > 90) say('Time warp limited to 10× while the engine is lit.', 'dim');
 
   if (whereLabel) {
     row('IGNITION', `${whereLabel}` + (isFinite(tt) ? `, T\u2212${fmtT(tt)}` : ''));
@@ -1338,7 +1345,7 @@ function quoteBurn(dv, whereLabel, tt, solved) {
     const at = whereLabel.includes('periapsis') ? 'PE' : whereLabel.includes('apoapsis') ? 'AP' : null;
     if (at) say(`  \u2192  BURN ${dir} ${secs.toFixed(1)} AT ${at}`, 'ok');
     else    say(`  \u2192  BURN ${dir} ${secs.toFixed(1)}`, 'ok');
-    say('The console lights the engine half a burn early so the impulse is centred on the node.', 'dim');
+    say('Ignition occurs half a burn early; impulse is centred on the node.', 'dim');
   }
   return secs;
 }
@@ -1643,8 +1650,8 @@ function cmdPlan(A) {
       row('ARRIVAL PERI', fmtDist(sol.arrival.periAlt) + ` over ${tk}`, 'ok');
       say('');
       say(`  →  BURN ${sol.mode} ${sol.dur.toFixed(2)} AT T+${sol.tIgn.toFixed(2)}`, 'ok');
-      say(`A textbook Hohmann aimed at ${tk}'s orbital radius is a collision course. This solution is flown forward through the sphere-of-influence change, and offset to arrive with a periapsis you can work with.`, 'dim');
-      say('Those decimals matter: one second of ignition time moves the arrival point about 20,000 km. Copy the line exactly.', 'warn');
+      say(`Solution integrated through the sphere-of-influence change. Aim point is offset from ${tk}'s centre — an unbiased transfer to its orbital radius is an impact trajectory.`, 'dim');
+      say('Ignition time is significant to 0.01 s — arrival shifts roughly 20,000 km per second of error.', 'warn');
     } else {
       const bs = burnTimeFor(Math.abs(w.dv1));
       row('BURN TIME', bs.toFixed(1) + ' s at full throttle');
@@ -1653,7 +1660,7 @@ function cmdPlan(A) {
       if (sol && sol.arrival && !sol.arrival.entered)
         say(`No intercept found from this orbit — closest approach ${fmtDist(sol.arrival.miss)}. Circularize, then try again.`, 'warn');
       else
-        say('Falling back to the textbook window. Expect to trim on the way out.', 'warn');
+        say('Falling back to the analytic window. Expect a midcourse trim.', 'warn');
     }
     return;
   }
@@ -1703,7 +1710,7 @@ function cmdPlan(A) {
     say('');
     say(`  →  BURN ${dv1 >= 0 ? 'PRO' : 'RET'} ${secs.toFixed(2)} AT T+${wait.toFixed(2)}`, 'ok');
     say(`  then, half an orbit later:   PLAN CIRC AP`, 'ok');
-    say('The counter-intuitive part: you catch the station by staying in the lower, faster orbit until the geometry is right — not by thrusting at it.', 'dim');
+    say('Phasing is flown from the lower orbit: shorter period, so the gap closes while coasting.', 'dim');
     return;
   }
 
@@ -1714,7 +1721,7 @@ function cmdPlan(A) {
   say('PLAN ESC             escape the current sphere of influence', 'out');
   say('PLAN XFER <BODY>     Hohmann transfer + launch window', 'out');
   say('PLAN RDV             station rendezvous phasing', 'out');
-  say('Every answer ends with a BURN line you can type straight back.', 'dim');
+  say('Each solution returns an executable BURN line.', 'dim');
 }
 
 function timeToSOIExit() {
@@ -1761,7 +1768,7 @@ function cmdDock() {
   say('TRANS AWAY <m/s>  back off', 'out');
   say('TRANS PORT|STBD <m/s>   kill lateral drift', 'out');
   say('TRANS NULL        cancel all relative motion (costs the full rel-vel)', 'out');
-  say('Rule of thumb: hold closing rate near range-in-metres ÷ 100 m/s.', 'dim');
+  say('Standard approach profile: closing rate ≈ range in metres ÷ 100.', 'dim');
 }
 
 function cmdTrans(A) {
@@ -1839,7 +1846,7 @@ const MISSIONS = [
     'Second stage has shut down at {182 km}. You are on a ballistic arc: apoapsis {400 km}, periapsis 900 km below the surface.',
     'Left alone this vehicle comes straight back down. Orbit is not about going up — it is about going sideways fast enough that the ground curves away beneath you.',
     'Coast to apoapsis, then burn {prograde} to lift periapsis out of the planet.'],
-  hint:'Try:  PLAN CIRC AP',
+  hint:'PLAN CIRC AP',
   setup(){ rig({name:'AURIGA-1', dry:2200, fuel:1800, thrust:30, isp:311, rcs:20});
     setOrbit('EARTH', -900, 400, 136, 30);
     S.power.battMax = 600; S.power.batt = 540; S.power.area = 14; },
@@ -1853,8 +1860,8 @@ const MISSIONS = [
   brief:[
     'You are parked in a {200 km} circular orbit. Mission wants you at {1000 km}.',
     'A single long burn will not do it cleanly. The efficient move is a {Hohmann transfer}: burn prograde once to stretch apoapsis up to the target altitude, coast a half-orbit, then burn prograde again at apoapsis to pull periapsis up behind it.',
-    'Two burns, half an orbit apart. Budget is tight — {around 440 m/s} if you fly it well.'],
-  hint:'Try:  PLAN APO 1000',
+    'Two burns, half an orbit apart. Budget {440 m/s} for the pair.'],
+  hint:'PLAN APO 1000  →  PLAN CIRC AP',
   setup(){ rig({name:'AURIGA-2', dry:2400, fuel:800, thrust:24, isp:311, rcs:20});
     setOrbit('EARTH', 200, 200, 0, 0);
     S.power.battMax = 600; S.power.batt = 600; S.power.area = 14; },
@@ -1869,7 +1876,7 @@ const MISSIONS = [
     'Station {CERES} holds a circular orbit at {400 km}. You are 100 km below it and trailing.',
     'Chasing directly does not work: thrusting toward the station raises your orbit, which {slows you down}. A lower orbit is a faster orbit — so you catch up by staying low, then climb once the phase angle is right.',
     'Close to within 20 m at under 0.30 m/s to capture. Your RCS holds about {22 m/s} — spend it carefully.'],
-  hint:'Try:  TGT STATION  then  PLAN RDV',
+  hint:'TGT STATION  →  PLAN RDV',
   setup(){ rig({name:'AURIGA-3', dry:2600, fuel:700, thrust:18, isp:311, rcs:40, rcsIsp:220, crew:2, o2:520});
     setOrbit('EARTH', 300, 300, 0, 0);
     S.objects = [ makeStation('EARTH', 400, 25) ];
@@ -1889,7 +1896,7 @@ const MISSIONS = [
     'From a {200 km} parking orbit, send this vehicle past the Moon and bring it home.',
     'Translunar injection is a prograde burn at the right moment — you are not aiming at where the Moon is, you are aiming at where it will be in about three days.',
     'Cross into the Moon\'s sphere of influence, then let its gravity bend you back toward Earth.'],
-  hint:'Try:  PLAN XFER MOON',
+  hint:'PLAN XFER MOON',
   setup(){ rig({name:'SELENE-1', dry:3400, fuel:8600, thrust:90, isp:315, rcs:30});
     setOrbit('EARTH', 200, 200, 0, 200);
     S.power.battMax = 1400; S.power.batt = 1400; S.power.area = 22; },
@@ -1904,7 +1911,7 @@ const MISSIONS = [
     'Same transfer as the flyby, but this time you stay.',
     'Arriving inside the Moon\'s sphere of influence you will be on a {hyperbolic} pass — faster than lunar escape velocity. Burn {retrograde} near closest approach to bleed off enough speed for the Moon to keep you.',
     'That is lunar orbit insertion. Miss it and you sail straight back out.'],
-  hint:'Try:  PLAN XFER MOON  — then once captured,  PLAN CIRC PE',
+  hint:'PLAN XFER MOON  →  PLAN CIRC PE after capture',
   setup(){ rig({name:'SELENE-2', dry:3600, fuel:16000, thrust:110, isp:315, rcs:30, crew:3, o2:900});
     setOrbit('EARTH', 200, 200, 0, 200);
     S.power.battMax = 1800; S.power.batt = 1800; S.power.area = 26; },
@@ -1921,7 +1928,7 @@ const MISSIONS = [
     'Drop periapsis to about {15 km}, coast down to it, then hold {retrograde} to kill your 1.7 km/s of horizontal speed. Go lower than that first and you will not have the altitude to arrest the fall.',
     'As horizontal speed dies the retrograde vector swings upward on its own, and the same command becomes your brake. Below 60 km the console swaps the apsis readouts for {descent rate} and {lateral drift} — those are the two numbers that matter now.',
     'Touchdown needs under {4 m/s} vertical and {3 m/s} lateral. Landing mode is armed. Budget about {2,100 m/s}.'],
-  hint:'Try:  PLAN PERI 15  — then at periapsis, BURN RET 400 and watch the descent rate',
+  hint:'PLAN PERI 15  →  BURN RET 400 at periapsis',
   setup(){ rig({name:'EAGLE', dry:2100, fuel:4200, thrust:45, isp:311, rcs:30, crew:2, o2:300});
     setOrbit('MOON', 100, 100, 0, 0);
     S.landingAllowed = true;
@@ -1937,7 +1944,7 @@ const MISSIONS = [
     'Leave Earth entirely.',
     'Escape velocity at your altitude is {1.414×} circular velocity — but where you spend the propellant matters. Burning at periapsis, where you are already moving fastest, converts more of it into leftover speed. That is the {Oberth effect}, and it is free.',
     'Push past escape and you stop orbiting Earth. You start orbiting the Sun.'],
-  hint:'Try:  PLAN ESC',
+  hint:'PLAN ESC',
   setup(){ rig({name:'PIONEER-VII', dry:2800, fuel:6200, thrust:36, isp:318, rcs:20});
     setOrbit('EARTH', 200, 200, 0, 0);
     S.power.battMax = 1600; S.power.batt = 1600; S.power.area = 30; },
@@ -1952,7 +1959,7 @@ const MISSIONS = [
     'You are already in solar orbit at Earth\'s distance, {1 AU} from the Sun. Mars sits at 1.52 AU.',
     'This is the same Hohmann transfer you flew to the Moon, scaled up by a factor of four hundred. The flight takes about {259 days}, and the window only opens when Mars is roughly {44° ahead} of you.',
     'Wind the clock forward, take the window, then capture at the far end.'],
-  hint:'Try:  PLAN XFER MARS  — then WARP 1000000 and watch PHASE NOW',
+  hint:'PLAN XFER MARS  →  WARP 1000000',
   setup(){ rig({name:'ARES-1', dry:3200, fuel:22000, thrust:60, isp:326, rcs:40});
     setHelio(1.0, 1.0, 0, 180.0);
     S.target = 'MARS';
@@ -1969,7 +1976,7 @@ const MISSIONS = [
     'A solar probe falling in toward the Sun. Perihelion is currently {0.18 AU} — and this instrument bus fails at {180 °C}.',
     'Heat scales with the inverse square of solar distance. At 0.18 AU the bus settles near {225 °C} and the vehicle is lost. You have about 87 days before you get there.',
     'You are near aphelion, which is exactly where a periapsis change is cheapest. Raise perihelion above {0.24 AU} — that brings you in near 155 °C, with margin.'],
-  hint:'Try:  PLAN PERI  with the target in km — 0.24 AU is 35,903,489 km',
+  hint:'PLAN PERI 35903489   (0.24 AU)',
   setup(){ rig({name:'HELIOS-4', dry:1400, fuel:2600, thrust:12, isp:318, rcs:20});
     setHelio(0.18, 0.90, 170, 0);
     S.thermLimit = 180;
@@ -1984,7 +1991,7 @@ const MISSIONS = [
   brief:[
     'No objectives. Full tanks, {200 km} Earth orbit, the Moon three days away and the whole system open.',
     'Everything the missions teach works here. PLAN will solve any maneuver you ask it for.'],
-  hint:'Try:  PLAN XFER MOON  ·  PLAN ESC  ·  TGT MARS',
+  hint:'PLAN XFER MOON · PLAN ESC · TGT MARS',
   setup(){ rig({name:'TESTBED', dry:2500, fuel:20000, thrust:60, isp:340, rcs:200, crew:1, o2:9000});
     setOrbit('EARTH', 200, 200, 0, 0);
     S.power.battMax = 4000; S.power.batt = 4000; S.power.area = 60; },
@@ -2015,8 +2022,8 @@ function loadMission(id) {
     S.objectives.forEach((o,i) => say(`  ${i+1}. ${o.text}`, 'out'));
   }
   say('');
-  say(m.hint || '', 'ok');
-  say('Clock is HOLD. Type  WARP 10  to start time, or  STAT  for the flight display.', 'sys');
+  if (m.hint) row('PROCEDURE', m.hint, 'ok');
+  row('CLOCK', 'HOLD', 'sys');
   saveProgress();
 }
 
@@ -2030,7 +2037,7 @@ function checkObjectives() {
     if (o.done) continue;
     let ok = false;
     try { ok = !!o.check(S, D); } catch (err) { ok = false; }
-    if (ok) { o.done = true; changed = true; say(`OBJECTIVE COMPLETE · ${o.text}`, 'ok'); }
+    if (ok) { o.done = true; changed = true; say(`OBJECTIVE MET · ${o.text}`, 'ok'); }
   }
   if (changed && S.objectives.every(o => o.done) && !S.completed) {
     S.completed = true;
@@ -2045,23 +2052,24 @@ function checkObjectives() {
     row('PROP LEFT', S.craft.fuel.toFixed(1) + ' kg');
     say('');
     const nxt = MISSIONS.find(m => m.id === S.mission.id + 1);
-    say(nxt ? `Next up: ${nxt.code} ${nxt.name}.  Type  MIS ${nxt.id}` : 'Every scripted mission is flown. Type MIS 0 for free flight.', 'sys');
+    if (nxt) row('NEXT', `MIS ${nxt.id}   ${nxt.code} ${nxt.name}`, 'sys');
+    else row('ROSTER', 'all scripted missions flown', 'sys');
     markComplete(S.mission.id);
   }
 }
 function cmdObj() {
-  if (!S.mission) return say('No mission loaded. Type MIS.', 'err');
+  if (!S.mission) return say('NO MISSION LOADED', 'err');
   head(S.mission.code + ' · OBJECTIVES');
   if (!S.objectives.length) return say('Free flight — no objectives.', 'sys');
   S.objectives.forEach((o,i) => say(`  ${o.done ? '✔' : '○'}  ${i+1}. ${o.text}`, o.done ? 'ok' : 'out'));
   say('');
-  say(S.mission.hint || '', 'dim');
+  if (S.mission.hint) row('PROCEDURE', S.mission.hint, 'ok');
 }
 function cmdMis(A) {
   if (A[0] !== undefined && A[0] !== '') {
     const n = parseInt(A[0], 10);
     if (!isNaN(n) && MISSIONS.some(m => m.id === n)) return loadMission(n);
-    return say('Usage: MIS <number>. Type MIS on its own for the list.', 'err');
+    return say('USAGE   MIS <number>', 'err');
   }
   head('MISSION ROSTER');
   const done = loadProgress();
@@ -2072,7 +2080,7 @@ function cmdMis(A) {
         done.includes(m.id) ? 'ok' : 'out');
   }
   say('');
-  say('Type  MIS 1  to fly one. They build on each other, so fly them in order.', 'sys');
+  say('Missions build on each other and are ordered accordingly.', 'dim');
 }
 </script>
 
@@ -2093,7 +2101,7 @@ function cmdHelp(topic) {
     say('');
     say('So circularizing means burning prograde at apoapsis until periapsis catches up. Raising your orbit takes two burns half an orbit apart — a Hohmann transfer.');
     say('');
-    say('The counter-intuitive one: to catch something ahead of you in the same orbit, burn {retrograde}. You drop into a lower, faster orbit and gain on it. Thrusting toward it would raise you and slow you down.', 'warn');
+    say('To catch an object ahead of you in the same orbit, burn {retrograde}. That drops you into a lower, shorter-period orbit and you gain on it. Thrusting toward it raises your orbit and you fall behind.', 'warn');
     return;
   }
   if (topic === 'BURN') {
@@ -2137,7 +2145,7 @@ function cmdHelp(topic) {
   say(pad('WARP <n>',22) + 'time warp — 0 holds the clock', 'out');
   say(pad('TGT <BODY|STATION>',22) + 'set a target', 'out');
   say('PLANNING', 'hd');
-  say(pad('PLAN',22) + 'the maneuver solver — start here', 'key');
+  say(pad('PLAN',22) + 'maneuver solver', 'key');
   say(pad('PLAN CIRC AP|PE',22) + 'circularize at an apsis', 'out');
   say(pad('PLAN APO <km>',22) + 'raise or lower apoapsis', 'out');
   say(pad('PLAN PERI <km>',22) + 'raise or lower periapsis', 'out');
@@ -2157,7 +2165,7 @@ function cmdHelp(topic) {
   say(pad('RESTART',22) + 'refly the current mission', 'out');
   say(pad('CLS',22) + 'clear the scratchpad', 'out');
   say('');
-  say('HELP ORBIT   why burns do what they do — read this one', 'key');
+  say('HELP ORBIT   how a burn reshapes an orbit', 'key');
   say('HELP BURN · HELP DOCK', 'dim');
 }
 
@@ -2189,7 +2197,19 @@ for (const [label, cmd] of CHIPS) {
   const b = document.createElement('button');
   b.type = 'button'; b.className = 'chip'; b.textContent = label;
   if (cmd === 'PLAN' || cmd === 'HELP') b.classList.add('hot');
-  b.addEventListener('click', () => { exec(cmd); document.getElementById('cmd').focus({preventScroll:true}); });
+  // Keep the caret in the field for mouse and keyboard users, but never pull the
+  // on-screen keyboard up on touch — the chips exist precisely to avoid typing.
+  let via = 'keyboard';
+  b.addEventListener('pointerdown', (ev) => {
+    via = ev.pointerType || 'mouse';
+    if (via !== 'mouse') ev.preventDefault();      // no focus transfer on touch or pen
+  });
+  b.addEventListener('click', () => {
+    exec(cmd);
+    derive(); updateHUD();
+    if (via !== 'touch' && via !== 'pen') input.focus({ preventScroll:true });
+    via = 'keyboard';
+  });
   chipBar.appendChild(b);
 }
 
@@ -2240,10 +2260,11 @@ function boot(restored) {
   if (!S.mission) {
     loadMission(1);
     const done = loadProgress();
-    if (done.length) say(`Flight record found — ${done.length} mission${done.length>1?'s':''} already flown. Type MIS for the roster.`, 'sys');
+    if (done.length) row('FLIGHT RECORD', `${done.length} mission${done.length>1?'s':''} flown`, 'sys');
   }
   requestAnimationFrame(frame);
-  if (window.matchMedia('(min-width: 860px)').matches) input.focus({preventScroll:true});
+  if (window.matchMedia('(min-width: 860px)').matches &&
+      window.matchMedia('(pointer: fine)').matches) input.focus({preventScroll:true});
 }
 document.getElementById('boot').addEventListener('click', () => boot());
 
