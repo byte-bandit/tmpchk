@@ -57,6 +57,13 @@ body{
 .lamp.ok{color:var(--nominal);border-color:#1E5A48;background:#0B1F1A}
 .lamp.caution{color:var(--caution);border-color:#5C4B15;background:#1F1A08;animation:pulse 1.4s ease-in-out infinite}
 .lamp.crit{color:var(--critical);border-color:#6B2418;background:#1F0D0A;animation:pulse .7s steps(2,end) infinite}
+.warprow{display:flex;align-items:center;gap:5px}
+.wbtn{
+  flex:0 0 auto;width:21px;height:21px;background:#0B121B;border:1px solid var(--rule);
+  color:var(--slate);font-family:var(--f-mono);font-size:13px;line-height:1;border-radius:2px;
+  cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;
+}
+.wbtn:active{background:var(--panel-2);color:var(--amber)}
 .railbtn{
   align-self:center;flex:0 0 auto;margin-left:7px;background:#0B121B;
   border:1px solid var(--rule);color:var(--slate);font-family:var(--f-disp);
@@ -72,7 +79,9 @@ body{
   .rail-v{font-size:12px}
   .rail-v.small{font-size:11px}
   #cell-dv{display:none}
-  .lamp{font-size:8px;padding:3px 6px;letter-spacing:.07em;max-width:34vw}
+  .lamp{font-size:8px;padding:3px 6px;letter-spacing:.07em;max-width:30vw}
+  #cell-ref{display:none}                 /* the CDU title already names the reference */
+  .wbtn{width:19px;height:19px;font-size:12px}
   .railbtn{font-size:8px;padding:8px 7px;margin-left:5px;letter-spacing:.08em}
 }
 @keyframes pulse{50%{opacity:.35}}
@@ -123,73 +132,111 @@ body{
 .ro.warn .ro-v{color:var(--caution)}
 .ro.bad .ro-v{color:var(--critical)}
 
-/* ---------- scratchpad ---------- */
-.pad{
+/* ---------- CDU: paged control & display unit ----------
+   Layout follows the Airbus MCDU: a title line carrying the page number, six
+   label/data row pairs split left and right, line-select keys flanking each
+   row, and a scratchpad line at the bottom that carries both typed entry and
+   system messages. Small type for labels, large for data.                  */
+.cdu{
   flex:1 1 auto;display:flex;flex-direction:column;min-height:0;
   background:var(--panel);border:1px solid var(--rule);
 }
-.pad-head{
-  display:flex;align-items:center;gap:8px;padding:5px 9px;border-bottom:1px solid var(--rule-soft);
-  font-family:var(--f-disp);font-size:8.5px;letter-spacing:.16em;color:var(--slate-dim);
-  text-transform:uppercase;flex:0 0 auto;
+.cdu-title{
+  display:flex;align-items:center;gap:8px;padding:5px 8px;flex:0 0 auto;
+  border-bottom:1px solid var(--rule-soft);
 }
-.pad-head b{color:var(--cyan);font-weight:600}
-.pad-head .obj{margin-left:auto;color:var(--slate);letter-spacing:.08em}
-.log{
-  flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:8px 9px 10px;
-  -webkit-overflow-scrolling:touch;overscroll-behavior:contain;
-  font-size:12.5px;line-height:1.5;
+.cdu-t{
+  font-family:var(--f-disp);font-size:10.5px;font-weight:600;letter-spacing:.15em;
+  color:var(--cyan);text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
-.log::-webkit-scrollbar{width:3px}
-.log::-webkit-scrollbar-thumb{background:var(--rule)}
-.ln{white-space:pre-wrap;word-break:break-word;margin:0}
-.ln.cmd{color:var(--cyan);margin-top:7px}
-.ln.cmd::before{content:"› ";color:var(--cyan-deep)}
-.ln.sys{color:var(--slate)}
-.ln.out{color:var(--ink)}
-.ln.key{color:var(--amber)}
-.ln.ok{color:var(--nominal)}
-.ln.warn{color:var(--caution)}
-.ln.err{color:var(--critical)}
-.ln.hd{color:var(--cyan);font-family:var(--f-disp);font-weight:600;letter-spacing:.1em;
-  margin-top:9px;font-size:11px;text-transform:uppercase;
-  border-bottom:1px solid var(--rule);padding-bottom:2px}
-.ln.dim{color:var(--slate-dim)}
-.ln .v{color:var(--amber);font-weight:500}
+.cdu-sub{font-family:var(--f-disp);font-size:8.5px;letter-spacing:.1em;color:var(--slate-dim);
+  text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cdu-pg{margin-left:auto;font-size:9px;color:var(--slate-dim);font-variant-numeric:tabular-nums;flex:0 0 auto}
+.slew{
+  flex:0 0 auto;width:24px;height:22px;background:#0B121B;border:1px solid var(--rule);
+  color:var(--slate);font-size:12px;line-height:1;border-radius:2px;cursor:pointer;padding:0;
+  -webkit-tap-highlight-color:transparent;
+}
+.slew:disabled{opacity:.3;cursor:default}
+.slew:active:not(:disabled){background:var(--panel-2);color:var(--amber)}
 
-/* ---------- chips ---------- */
-.chips{
-  display:grid;grid-template-columns:repeat(6,1fr);gap:4px;padding:5px 7px;flex:0 0 auto;
-  border-top:1px solid var(--rule-soft);
+.cdu-body{display:flex;align-items:stretch;flex:1 1 auto;min-height:172px;gap:3px;padding:3px}
+.lskcol{display:grid;grid-template-rows:repeat(6,1fr);gap:3px;flex:0 0 auto}
+.lsk{
+  width:22px;background:#0C131C;border:1px solid var(--rule);border-radius:2px;
+  color:#2B3444;font-size:10px;line-height:1;cursor:default;padding:0;
+  display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;
 }
-.chip{
+.lsk.on{color:var(--cyan);border-color:#25404E;background:#0E1A22;cursor:pointer}
+.lsk.on:active{background:#15303C;color:var(--amber)}
+.lsk.go{color:var(--caution);border-color:#4A3B12;background:#1A1608}
+.lsk.go:active{background:#2A2410}
+
+.crows{display:grid;grid-template-rows:repeat(6,1fr);flex:1 1 auto;min-width:0;gap:0}
+.crow{
+  display:grid;grid-template-columns:1fr 1fr;gap:6px;min-width:0;align-content:center;
+  padding:2px 5px;border-bottom:1px solid #111925;
+}
+.crow:last-child{border-bottom:0}
+.fld{min-width:0;display:flex;flex-direction:column;justify-content:center;gap:1px}
+.fld.right{text-align:right}
+.flab{
+  font-family:var(--f-disp);font-size:7.5px;letter-spacing:.13em;color:var(--slate-dim);
+  text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.15;
+}
+.fval{
+  font-size:12.5px;font-weight:500;color:var(--amber);font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2;letter-spacing:-.01em;
+}
+.fval.sel{color:var(--cyan)}
+.fval.go{color:var(--caution)}
+.fval.ok{color:var(--nominal)}
+.fval.bad{color:var(--critical)}
+.fval.dim{color:var(--slate-dim)}
+.fld.tap{cursor:pointer}
+
+/* ---------- scratchpad line ---------- */
+.entry{
+  display:flex;align-items:center;flex:0 0 auto;position:relative;
+  border-top:1px solid var(--rule);background:#0A101A;
+}
+.entry .caret{padding:0 6px 0 8px;color:var(--cyan);font-weight:700;flex:0 0 auto}
+#cmd{
+  flex:1 1 auto;min-width:0;background:transparent;border:0;outline:none;color:var(--amber);
+  font-family:var(--f-mono);font-size:16px;font-weight:500;padding:10px 0;letter-spacing:.02em;
+}
+#cmd::placeholder{color:#313C4E;font-weight:400}
+.spmsg{
+  position:absolute;left:22px;right:96px;top:50%;transform:translateY(-50%);
+  font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;
+}
+.spmsg.info{color:var(--slate)}
+.spmsg.ok{color:var(--nominal)}
+.spmsg.warn{color:var(--caution)}
+.spmsg.err{color:var(--critical)}
+.entry button{
+  flex:0 0 auto;background:transparent;border:0;border-left:1px solid var(--rule);
+  font-family:var(--f-disp);font-size:10px;font-weight:700;letter-spacing:.12em;
+  padding:12px 9px;cursor:pointer;-webkit-tap-highlight-color:transparent;
+}
+#clr{color:var(--slate)}
+#go{color:var(--cyan)}
+.entry button:active{background:var(--panel-2);color:var(--amber)}
+
+/* ---------- function keys: page selection only ---------- */
+.pagekeys{
+  display:grid;grid-template-columns:repeat(6,1fr);gap:4px;flex:0 0 auto;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+.pk{
   min-width:0;background:#111925;border:1px solid var(--rule);color:var(--slate);
-  font-family:var(--f-disp);font-size:10px;font-weight:600;letter-spacing:.06em;
-  padding:6px 3px;border-radius:2px;cursor:pointer;white-space:nowrap;
+  font-family:var(--f-disp);font-size:9.5px;font-weight:600;letter-spacing:.06em;
+  padding:7px 2px;border-radius:2px;cursor:pointer;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;text-align:center;
   -webkit-tap-highlight-color:transparent;
 }
-.chip:active,.chip:focus-visible{background:#1B2534;color:var(--amber);border-color:var(--amber-dim);outline:none}
-.chip.hot{color:var(--amber);border-color:var(--amber-dim)}
-
-/* ---------- input ---------- */
-.entry{
-  display:flex;align-items:center;gap:0;flex:0 0 auto;
-  border-top:1px solid var(--rule);background:#0A101A;
-  padding-bottom:env(safe-area-inset-bottom);
-}
-.entry .caret{padding:0 7px 0 9px;color:var(--cyan);font-weight:700;flex:0 0 auto}
-#cmd{
-  flex:1 1 auto;min-width:0;background:transparent;border:0;outline:none;color:var(--amber);
-  font-family:var(--f-mono);font-size:16px;font-weight:500;padding:11px 0;letter-spacing:.02em;
-}
-#cmd::placeholder{color:#354054;font-weight:400}
-#go{
-  flex:0 0 auto;background:transparent;border:0;border-left:1px solid var(--rule);
-  color:var(--cyan);font-family:var(--f-disp);font-size:11px;font-weight:700;letter-spacing:.14em;
-  padding:12px 14px;cursor:pointer;
-}
-#go:active{background:var(--panel-2);color:var(--amber)}
+.pk:active{background:#1B2534;color:var(--amber)}
+.pk.cur{color:var(--amber);border-color:var(--amber-dim);background:#191A14}
 button:focus-visible,input:focus-visible{outline:1px solid var(--amber);outline-offset:-1px}
 
 /* ---------- boot veil ---------- */
@@ -211,8 +258,8 @@ button:focus-visible,input:focus-visible{outline:1px solid var(--amber);outline-
 <div id="app">
   <div class="rail" id="rail">
     <div class="rail-cell"><span class="rail-k">MET</span><span class="rail-v" id="r-met">000:00:00:00</span></div>
-    <div class="rail-cell"><span class="rail-k">Warp</span><span class="rail-v" id="r-warp">1×</span></div>
-    <div class="rail-cell"><span class="rail-k">Ref</span><span class="rail-v small" id="r-soi">EARTH</span></div>
+    <div class="rail-cell"><span class="rail-k">Warp</span><span class="warprow"><button class="wbtn" id="w-dn" type="button" aria-label="Slower">−</button><span class="rail-v" id="r-warp">1×</span><button class="wbtn" id="w-up" type="button" aria-label="Faster">+</button></span></div>
+    <div class="rail-cell" id="cell-ref"><span class="rail-k">Ref</span><span class="rail-v small" id="r-soi">EARTH</span></div>
     <div class="rail-cell" id="cell-dv"><span class="rail-k">ΔV Rem</span><span class="rail-v small" id="r-dv">0</span></div>
     <div class="rail-spacer"></div>
     <div class="lamp ok" id="r-lamp">NOMINAL</div>
@@ -244,17 +291,29 @@ button:focus-visible,input:focus-visible{outline:1px solid var(--amber);outline-
     </div>
 
     <div class="col-b">
-      <div class="pad">
-        <div class="pad-head"><b id="p-mis">NO MISSION</b><span class="obj" id="p-obj"></span></div>
-        <div class="log" id="log"></div>
-        <div class="chips" id="chips"></div>
+      <div class="cdu">
+        <div class="cdu-title">
+          <span class="cdu-t" id="cdu-t">ORBIT</span>
+          <span class="cdu-sub" id="cdu-sub"></span>
+          <span class="cdu-pg" id="cdu-pg">1/1</span>
+          <button class="slew" id="pg-prev" type="button" aria-label="Previous page">‹</button>
+          <button class="slew" id="pg-next" type="button" aria-label="Next page">›</button>
+        </div>
+        <div class="cdu-body">
+          <div class="lskcol" id="lsk-l"></div>
+          <div class="crows" id="crows"></div>
+          <div class="lskcol" id="lsk-r"></div>
+        </div>
         <form class="entry" id="entry" autocomplete="off">
           <span class="caret">›</span>
-          <input id="cmd" name="cmd" type="text" placeholder="type a command — HELP" autocomplete="off"
+          <input id="cmd" name="cmd" type="text" placeholder="" autocomplete="off"
                  autocorrect="off" autocapitalize="characters" spellcheck="false" enterkeyhint="send">
+          <span class="spmsg info" id="spmsg"></span>
+          <button id="clr" type="button">CLR</button>
           <button id="go" type="submit">EXEC</button>
         </form>
       </div>
+      <div class="pagekeys" id="pagekeys"></div>
     </div>
   </div>
 </div>
@@ -465,6 +524,7 @@ const S = {
   ledger: { dvUsed:0, burns:0 },
   flags: { lunarSOI:false, perihelionPassed:false },
   landingAllowed: false, thermLimit: 800, completed: false, pauseAfterBurn: false,
+  solution: null, planName: '', planDetail: '', burnSel: { dir:'PRO', at:'AP', dur:0 },
 };
 
 const craftMass = () => S.craft.dry + S.craft.fuel + S.craft.rcs;
@@ -693,7 +753,7 @@ function checkHazards() {
 function loseMission(msg) {
   S.status = 'lost'; S.warp = 0; S.burn = null; S.sched = null;
   say(msg, 'err');
-  row('AVAILABLE', 'RESTART · MIS', 'sys');
+  row('AVAILABLE', 'RESTART · MIS', 'dim');
   return true;
 }
 
@@ -982,16 +1042,34 @@ function fmtMET(sec) {
 }
 const pad = (s,n) => String(s).padEnd(n,' ');
 
-const logEl = document.getElementById('log');
+const logEl = document.createElement('div');   // detached: the MSG page renders MSGS
+const MSGS = [];
+const SEVERITY = { err:'err', warn:'warn', ok:'ok', key:'info', hd:'info', sys:'info', dim:'info', out:'info' };
 function say(text, cls) {
+  const plain = String(text).replace(/\{|\}/g, '');
+  MSGS.push({ t: S.t, text: plain, cls: cls || 'out' });
+  while (MSGS.length > 300) MSGS.shift();
+  if (plain.trim() && cls !== 'dim' && cls !== 'hd') postMessage_(plain, SEVERITY[cls || 'out'] || 'info');
   const p = document.createElement('p');
   p.className = 'ln ' + (cls || 'out');
   p.innerHTML = String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/\{([^}]*)\}/g, '<span class="v">$1</span>');
   logEl.appendChild(p);
   while (logEl.childElementCount > 400) logEl.removeChild(logEl.firstChild);
-  logEl.scrollTop = logEl.scrollHeight;
 }
+
+/** The scratchpad carries the newest message until it is cleared, as on an MCDU.
+ *  A lower-severity advisory does not wipe a standing caution or warning: on a
+ *  real annunciator the more serious message holds the line. */
+let spMessage = null;
+const SEV_RANK = { info:0, ok:1, warn:2, err:3 };
+function postMessage_(text, sev) {
+  const now = Date.now();
+  if (spMessage && SEV_RANK[sev] < SEV_RANK[spMessage.sev] && now - spMessage.at < 6000) return;
+  spMessage = { text, sev, at: now };
+  syncScratchpad();
+}
+function clearMessage() { spMessage = null; syncScratchpad(); }
 function row(k, v, cls) { say(pad(k,14) + v, cls || 'out'); }
 function head(t) { say(t, 'hd'); }
 
@@ -1047,9 +1125,6 @@ function updateHUD() {
   if (lamp.textContent !== txt) lamp.textContent = txt;
   lamp.className = 'lamp ' + cls;
 
-  const done = S.objectives.filter(o => o.done).length;
-  document.getElementById('p-mis').textContent = S.mission ? S.mission.code + ' · ' + S.mission.name : 'NO MISSION';
-  document.getElementById('p-obj').textContent = S.objectives.length ? `${done}/${S.objectives.length} OBJ` : '';
 }
 </script>
 
@@ -1102,16 +1177,15 @@ function exec(raw) {
 
   switch (c) {
 
-  case 'HELP': case '?': case 'MAN': return cmdHelp(A[0]);
+  case 'HELP': case '?': case 'MAN': return gotoPage('HELP');
 
-  case 'STAT': case 'PFD': return cmdStat();
-  case 'NAV':  case 'ORB': return cmdNav();
+  case 'STAT': case 'PFD': case 'ORB': return gotoPage('ORB');
+  case 'NAV': case 'ORBIT': return gotoPage('ORB', 1);
+  case 'MSG': case 'MESSAGES': return gotoPage('MSG');
+  case 'MENU': case 'INDEX': case 'SYS': case 'STATUS': return gotoPage('MENU');
   case 'TIME': case 'CLK': {
-    head('CLOCK');
-    row('MET', fmtMET(S.t));
-    row('WARP', S.warp === 0 ? 'HOLD' : S.warp + '×');
-    if (S.sched) row('ARMED', `${DIRNAME[S.sched.dir]} ${S.sched.dur}s at ${S.sched.at}`);
-    return;
+    say(`MET ${fmtMET(S.t)} · WARP ${S.warp === 0 ? 'HOLD' : S.warp + '×'}`, 'sys');
+    return gotoPage('ORB');
   }
 
   case 'BURN': case 'B': {
@@ -1179,25 +1253,30 @@ function exec(raw) {
     return say(`Target set: {${S.target}}.`, 'sys');
   }
 
-  case 'PLAN': return cmdPlan(A);
-  case 'DOCK': case 'PROX': return cmdDock();
+  case 'PLAN': {
+    if (!A.length) return gotoPage('PLAN');
+    cmdPlan(A);
+    if (S.solution) gotoPage('PLANR');
+    return;
+  }
+  case 'DOCK': case 'PROX': return gotoPage('DOCK');
   case 'TRANS': case 'RCS': return cmdTrans(A);
 
   case 'PWR': case 'POWER': case 'EPS': return cmdPwr(A);
-  case 'FUEL': case 'PROP': return cmdFuel();
-  case 'COMM': case 'DSN': return cmdComm();
-  case 'THERM': case 'TEMP': return cmdTherm();
-  case 'LIFE': case 'ECLSS': return cmdLife();
-  case 'SYS': case 'STATUS': { cmdPwr([]); cmdFuel(); cmdTherm(); return; }
+  case 'FUEL': case 'PROP': return gotoPage('FUEL');
+  case 'COMM': case 'DSN': return gotoPage('COMM');
+  case 'THERM': case 'TEMP': return gotoPage('THRM');
+  case 'LIFE': case 'ECLSS': return gotoPage('LIFE');
+
 
   case 'MIS': case 'MISSION': case 'MISSIONS': return cmdMis(A);
-  case 'LOG': case 'OBJ': return cmdObj();
+  case 'LOG': case 'OBJ': return gotoPage('MSN');
   case 'RESTART': case 'RESET': {
     if (!S.mission) return say('NO MISSION LOADED', 'err');
     return loadMission(S.mission.id);
   }
   case 'FULL': case 'FS': { toggleFullscreen(); return; }
-  case 'CLS': case 'CLEAR': { logEl.innerHTML = ''; return; }
+  case 'CLS': case 'CLEAR': { MSGS.length = 0; clearMessage(); return; }
   case 'LAND': {
     S.landingAllowed = !S.landingAllowed;
     return say(`Landing mode ${S.landingAllowed ? 'ARMED — touchdown will be attempted' : 'SAFED'}.`, 'sys');
@@ -1208,115 +1287,13 @@ function exec(raw) {
 }
 
 /* ---- readout pages ---------------------------------------- */
-function cmdStat() {
-  const d = D, b = d.b;
-  head('PRIMARY FLIGHT DISPLAY');
-  row('REFERENCE', b.name + `  (µ ${b.mu.toExponential(4)} km³/s²)`);
-  row('MET', fmtMET(S.t));
-  row('ALTITUDE', fmtDist(d.alt));
-  row('VELOCITY', fmtVel(d.e.v) + `   (vert ${fmtVel(d.e.vr)})`);
-  row('APOAPSIS', d.escape ? 'escape trajectory' : fmtDist(d.apoAlt) + `   T−${fmtT(d.tApo)}`);
-  row('PERIAPSIS', fmtDist(d.perAlt) + (d.escape ? '' : `   T−${fmtT(d.tPeri)}`));
-  row('ECCENTRICITY', d.e.e.toFixed(5));
-  row('PERIOD', d.e.period === Infinity ? '——' : fmtT(d.e.period));
-  row('ΔV REMAINING', fmtDV(d.dv));
-  row('MASS', craftMass().toFixed(0) + ' kg');
-  if (S.burn) row('ENGINE', `${DIRNAME[S.burn.dir].toUpperCase()} · ${S.burn.left.toFixed(1)} s left`, 'warn');
-  if (S.sched) row('ARMED', `${DIRNAME[S.sched.dir]} ${S.sched.dur} s at ${S.sched.at}`, 'warn');
-  if (d.perAlt < 0) say('PERIAPSIS IS BELOW THE SURFACE — this is an impact trajectory.', 'err');
-}
-function cmdNav() {
-  const d = D, b = d.b, e = d.e;
-  head('NAVIGATION');
-  row('SEMI-MAJOR a', isFinite(e.a) ? fmtDist(e.a) : '∞');
-  row('ECCENTRICITY', e.e.toFixed(6) + (e.e < 1 ? ' (elliptic)' : e.e > 1 ? ' (hyperbolic)' : ' (parabolic)'));
-  row('PERI RADIUS', fmtDist(e.rp) + `   alt ${fmtDist(e.rp - b.R)}`);
-  row('APO RADIUS', isFinite(e.ra) ? fmtDist(e.ra) + `   alt ${fmtDist(e.ra - b.R)}` : '——');
-  row('TRUE ANOM ν', (e.nu*180/Math.PI).toFixed(2) + '°');
-  row('ARG OF PERI', (normAngle(e.argp)*180/Math.PI).toFixed(2) + '°');
-  row('SPEC. ENERGY', e.energy.toFixed(4) + ' km²/s²');
-  row('ANG MOMENTUM', Math.abs(e.h).toFixed(1) + ' km²/s' + (e.dir > 0 ? '  prograde' : '  retrograde'));
-  row('DIRECTION', e.dir > 0 ? 'counter-clockwise' : 'clockwise');
-  row('SOI RADIUS', isFinite(b.soi) ? fmtDist(b.soi) : '——');
-  row('V-CIRCULAR', fmtVel(vCirc(b.mu, e.r)) + '  at this radius');
-  row('V-ESCAPE', fmtVel(Math.sqrt(2*b.mu/e.r)));
-  const t = targetRel();
-  if (t) { say(''); row('TARGET', t.name, 'key');
-    row('  RANGE', fmtDist(V.len(t.r)));
-    row('  REL VEL', fmtVel(V.len(t.v)));
-    const closing = -V.dot(V.unit(t.r), t.v);
-    row('  CLOSING', fmtVel(closing) + (closing > 0 ? '  (approaching)' : '  (opening)')); }
-}
 function cmdPwr(A) {
   if (A && A[0] && ['HEAT','SCI','COMM'].includes(A[0])) {
     const on = A[1] !== 'OFF';
     S.loads[A[0]] = on;
-    return say(`${A[0]} load ${on ? 'ON' : 'OFF'}.`, 'sys');
+    return say(`${A[0]} LOAD ${on ? 'ON' : 'OFF'}`, 'sys');
   }
-  head('ELECTRICAL POWER');
-  row('ARRAY OUTPUT', D.gen.toFixed(0) + ' W' + (D.ecl ? '   ECLIPSE — no illumination' : ''), D.ecl ? 'warn' : 'out');
-  row('SOLAR FLUX', D.flux.toFixed(0) + ' W/m²   at ' + (D.dSun/AU).toFixed(4) + ' AU');
-  row('BUS LOAD', D.load.toFixed(0) + ' W');
-  row('NET', (D.gen - D.load).toFixed(0) + ' W', D.gen - D.load < 0 ? 'warn' : 'ok');
-  const pct = S.power.batt/S.power.battMax*100;
-  row('BATTERY', `${S.power.batt.toFixed(1)} / ${S.power.battMax} Wh   ${pct.toFixed(0)}%`,
-      pct < 20 ? 'err' : pct < 50 ? 'warn' : 'ok');
-  const bars = Math.round(pct/5);
-  say('             [' + '█'.repeat(bars) + '·'.repeat(20-bars) + ']', pct < 20 ? 'err' : 'ok');
-  if (D.gen < D.load) {
-    const hrs = S.power.batt / (D.load - D.gen);
-    row('ENDURANCE', fmtT(hrs*3600) + ' to bus undervolt', 'warn');
-  }
-  say('');
-  say('Switchable loads —  PWR HEAT OFF  ·  PWR SCI ON  ·  PWR COMM OFF', 'dim');
-  for (const k of ['HEAT','COMM','SCI'])
-    row('  ' + k, S.loads[k] ? 'ON' : 'OFF', S.loads[k] ? 'ok' : 'dim');
-}
-function cmdFuel() {
-  head('PROPULSION');
-  row('ENGINE', `${(S.craft.thrust*1000).toFixed(0)} N   Isp ${S.craft.isp} s`);
-  const pct = S.craft.fuelMax ? S.craft.fuel/S.craft.fuelMax*100 : 0;
-  row('MAIN PROP', `${S.craft.fuel.toFixed(1)} / ${S.craft.fuelMax.toFixed(0)} kg   ${pct.toFixed(1)}%`,
-      pct < 15 ? 'warn' : 'out');
-  const bars = Math.round(pct/5);
-  say('             [' + '█'.repeat(bars) + '·'.repeat(20-bars) + ']', pct < 15 ? 'warn' : 'ok');
-  row('RCS PROP', `${S.craft.rcs.toFixed(2)} / ${S.craft.rcsMax.toFixed(0)} kg`);
-  row('DRY MASS', S.craft.dry.toFixed(0) + ' kg');
-  row('TOTAL MASS', craftMass().toFixed(1) + ' kg');
-  row('ΔV REMAINING', fmtDV(dvRemaining()), 'key');
-  row('ΔV EXPENDED', fmtDV(S.ledger.dvUsed));
-  row('BURN RATE', (S.craft.thrust*1000/(S.craft.isp*G0)).toFixed(3) + ' kg/s');
-  row('FULL-THROTTLE', fmtT(S.craft.fuel/(S.craft.thrust*1000/(S.craft.isp*G0))) + ' of burn time left');
-}
-function cmdComm() {
-  head('COMMUNICATIONS');
-  row('EARTH RANGE', fmtDist(D.dEarth));
-  row('ONE-WAY DELAY', D.lightTime < 1 ? (D.lightTime*1000).toFixed(0)+' ms' : fmtT(D.lightTime));
-  row('ROUND TRIP', D.lightTime < 1 ? (D.lightTime*2000).toFixed(0)+' ms' : fmtT(D.lightTime*2));
-  const sig = 1e6 / Math.max(D.dEarth, 1)**2 * 1e6;
-  row('SIGNAL', S.loads.COMM ? (sig > 1 ? 'STRONG' : sig > 0.02 ? 'USABLE' : 'MARGINAL') : 'TRANSMITTER OFF',
-      S.loads.COMM ? 'ok' : 'warn');
-  row('DATA RATE', S.loads.COMM ? Math.max(0.1, Math.min(2048, sig*40)).toFixed(1) + ' kbps' : '—');
-  if (D.lightTime > 1) say(`Command uplink latency at this range: ${fmtT(D.lightTime)} one way.`, 'dim');
-}
-function cmdTherm() {
-  head('THERMAL');
-  const tl = S.thermLimit || 800;
-  row('HULL', S.therm.hull.toFixed(1) + ' °C',
-      S.therm.hull > tl*0.8 ? 'err' : S.therm.hull > tl*0.4 ? 'warn' : 'ok');
-  row('SOLAR FLUX', D.flux.toFixed(0) + ' W/m²   (' + (D.flux/1361).toFixed(2) + '× Earth)');
-  row('ILLUMINATION', D.ecl ? 'ECLIPSE' : 'SUNLIT');
-  row('LIMIT', tl + ' °C structural failure');
-  if (S.therm.hull > tl*0.55) say('Raise perihelion. Heat load rises with the inverse square of solar distance.', 'warn');
-}
-function cmdLife() {
-  head('LIFE SUPPORT');
-  if (!S.craft.crew) { row('CREW', 'none — uncrewed vehicle'); return; }
-  row('CREW', S.craft.crew);
-  const hrs = S.craft.o2 / S.craft.crew;
-  row('O₂ REMAINING', fmtT(hrs*3600) + ` (${S.craft.o2.toFixed(0)} crew-hours)`, hrs < 24 ? 'warn' : 'ok');
-  row('CABIN', S.power.batt > 0 ? '101.3 kPa · 21.1 °C' : 'THERMAL CONTROL LOST', S.power.batt > 0 ? 'ok' : 'err');
-  row('CO₂ SCRUBBER', S.loads.HEAT ? 'NOMINAL' : 'OFFLINE — powered down', S.loads.HEAT ? 'ok' : 'err');
+  gotoPage('PWR');
 }
 </script>
 
@@ -1338,9 +1315,11 @@ function quoteBurn(dv, whereLabel, tt, solved) {
       say(`Solved by integration: ${(secs - impulsive).toFixed(1)} s longer than the impulsive figure.`, 'dim');
   } else if (solved && solved.dur == null && solved.short) {
     if (Math.abs(dv) > dvRemaining()) {
+      S.solution = null;
       row('BURN TIME', 'not achievable — not enough propellant', 'err');
       say(`This needs ${fmtDV(Math.abs(dv))} and you are carrying ${fmtDV(dvRemaining())}. Choose a nearer target.`, 'err');
     } else {
+      S.solution = null;
       row('BURN TIME', 'not achievable from this point in the orbit', 'err');
       say(`Propellant is not the limit — you have ${fmtDV(dvRemaining())} and this needs ${fmtDV(Math.abs(dv))}. A burn reshapes the orbit on the far side, so this target cannot be reached from where you are burning. Try the opposite apsis.`, 'err');
     }
@@ -1350,6 +1329,11 @@ function quoteBurn(dv, whereLabel, tt, solved) {
   }
   if (secs > 90) say('Time warp limited to 10× while the engine is lit.', 'dim');
 
+  const node = whereLabel && whereLabel.includes('periapsis') ? 'PE'
+             : whereLabel && whereLabel.includes('apoapsis') ? 'AP' : null;
+  S.solution = { name: S.planName || 'MANEUVER', dir, secs, node, nodeLabel: whereLabel || 'immediate',
+                 dv: Math.abs(dv), detail: S.planDetail || '',
+                 prop: secs != null ? secs * (S.craft.thrust*1000/(S.craft.isp*G0)) : null };
   if (whereLabel) {
     row('IGNITION', `${whereLabel}` + (isFinite(tt) ? `, T\u2212${fmtT(tt)}` : ''));
     say('');
@@ -1569,7 +1553,9 @@ function cmdPlan(A) {
     const at = A[1] === 'PE' ? 'PE' : 'AP';
     if (at === 'AP' && !isFinite(e.ra)) return say('No apoapsis on an escape trajectory. Try PLAN CIRC PE.', 'err');
     const r = at === 'AP' ? e.ra : e.rp;
-    head('MANEUVER · CIRCULARIZE AT ' + (at === 'AP' ? 'APOAPSIS' : 'PERIAPSIS'));
+    S.planName = 'CIRCULARIZE AT ' + (at === 'AP' ? 'APOAPSIS' : 'PERIAPSIS');
+    S.planDetail = 'circular at ' + fmtDist(r - b.R);
+    head('MANEUVER · ' + S.planName);
     row('AT RADIUS', fmtDist(r) + `   alt ${fmtDist(r - b.R)}`);
     row('CURRENT V', fmtVel(vAtR(mu, r, e.a)));
     row('CIRCULAR V', fmtVel(vCirc(mu, r)));
@@ -1585,6 +1571,7 @@ function cmdPlan(A) {
     if (!isFinite(alt)) return say('Usage: PLAN APO <target apoapsis altitude, km>', 'err');
     const r1 = e.rp, r2 = alt + b.R;
     if (r2 < r1) return say('Target apoapsis is below your periapsis. Use PLAN PERI instead.', 'err');
+    S.planName = 'SET APOAPSIS'; S.planDetail = 'apoapsis → ' + fmtDist(alt);
     head('MANEUVER · RAISE APOAPSIS');
     row('BURN AT', 'periapsis, ' + fmtDist(r1 - b.R) + ' alt');
     row('NEW APOAPSIS', fmtDist(alt));
@@ -1599,6 +1586,7 @@ function cmdPlan(A) {
     if (!isFinite(e.ra)) return say('No apoapsis to burn at on an escape trajectory.', 'err');
     const r1 = e.ra, r2 = alt + b.R;
     if (r2 > r1) {
+      S.planName = 'SET PERIAPSIS'; S.planDetail = 'periapsis → ' + fmtDist(alt);
       head('MANEUVER · CHANGE PERIAPSIS');
       row('YOUR APOAPSIS', fmtDist(r1 - b.R));
       row('TARGET PERI', fmtDist(alt));
@@ -1621,6 +1609,7 @@ function cmdPlan(A) {
   }
 
   if (sub === 'ESC' || sub === 'ESCAPE') {
+    S.planName = 'ESCAPE ' + b.name; S.planDetail = 'leave ' + b.name + ' SOI';
     head('MANEUVER · ESCAPE ' + b.name);
     const vesc = Math.sqrt(2*mu/e.r);
     row('AT RADIUS', fmtDist(e.r));
@@ -1660,6 +1649,10 @@ function cmdPlan(A) {
       row('ARRIVAL', `${fmtT(sol.arrival.t - S.t)} from now`);
       row('ARRIVAL PERI', fmtDist(sol.arrival.periAlt) + ` over ${tk}`, 'ok');
       say('');
+      S.solution = { name: 'TRANSFER TO ' + tk, dir: sol.mode, secs: sol.dur, node: 'T',
+                     when: S.t + sol.tIgn, nodeLabel: `T+${sol.tIgn.toFixed(2)} s`,
+                     dv: Math.abs(w.dv1), prop: sol.dur * (S.craft.thrust*1000/(S.craft.isp*G0)),
+                     detail: `arrive ${fmtDist(sol.arrival.periAlt)} over ${tk}` };
       say(`  →  BURN ${sol.mode} ${sol.dur.toFixed(2)} AT T+${sol.tIgn.toFixed(2)}`, 'ok');
       say(`Solution integrated through the sphere-of-influence change. Aim point is offset from ${tk}'s centre — an unbiased transfer to its orbital radius is an impact trajectory.`, 'dim');
       say('Ignition time is significant to 0.01 s — arrival shifts roughly 20,000 km per second of error.', 'warn');
@@ -1719,6 +1712,10 @@ function cmdPlan(A) {
     row('ΔV', fmtDV(Math.abs(dv1)) + '  ' + (dv1 >= 0 ? 'prograde' : 'retrograde'));
     row('BURN TIME', secs.toFixed(1) + ' s');
     say('');
+    S.solution = { name: 'RENDEZVOUS', dir: dv1 >= 0 ? 'PRO' : 'RET', secs, node: 'T',
+                   when: S.t + wait, nodeLabel: `T+${wait.toFixed(2)} s`, dv: Math.abs(dv1),
+                   prop: secs * (S.craft.thrust*1000/(S.craft.isp*G0)),
+                   detail: `transfer to ${fmtDist(se.a - b.R)}, then CIRC AP` };
     say(`  →  BURN ${dv1 >= 0 ? 'PRO' : 'RET'} ${secs.toFixed(2)} AT T+${wait.toFixed(2)}`, 'ok');
     say(`  then, half an orbit later:   PLAN CIRC AP`, 'ok');
     say('Phasing is flown from the lower orbit: shorter period, so the gap closes while coasting.', 'dim');
@@ -1751,35 +1748,6 @@ function timeToSOIExit() {
 function rcsDV() {
   const m0 = craftMass(), m1 = m0 - S.craft.rcs;
   return m1 <= 0 ? 0 : S.craft.rcsIsp*G0*Math.log(m0/m1);
-}
-function cmdDock() {
-  const t = targetRel();
-  if (!t) return say('No target set. Try  TGT STATION.', 'err');
-  const range = V.len(t.r), rel = V.len(t.v);
-  const los = V.unit(t.r);
-  const closing = -V.dot(los, t.v);
-  const lateral = Math.abs(V.crs(los, t.v));
-  head('PROXIMITY OPS · ' + t.name);
-  row('RANGE', fmtDist(range));
-  row('REL VELOCITY', fmtVel(rel));
-  row('CLOSING RATE', fmtVel(closing) + (closing > 0 ? '  approaching' : '  opening'), closing > 0 ? 'ok' : 'warn');
-  row('LATERAL RATE', fmtVel(lateral), lateral*1000 > 1 ? 'warn' : 'ok');
-  row('RCS ΔV', fmtDV(rcsDV()) + `   ${S.craft.rcs.toFixed(2)} kg`);
-  if (range > 30) {
-    say('');
-    say('Too far for proximity ops. Match orbits first — PLAN RDV.', 'warn');
-    return;
-  }
-  say('');
-  row('CAPTURE GATE', 'range < 20 m · closing < 0.30 m/s · lateral < 0.10 m/s');
-  const eta = closing > 1e-6 ? range/closing : Infinity;
-  row('CONTACT IN', fmtT(eta));
-  say('');
-  say('TRANS TGT <m/s>   thrust toward the station', 'out');
-  say('TRANS AWAY <m/s>  back off', 'out');
-  say('TRANS PORT|STBD <m/s>   kill lateral drift', 'out');
-  say('TRANS NULL        cancel all relative motion (costs the full rel-vel)', 'out');
-  say('Standard approach profile: closing rate ≈ range in metres ÷ 100.', 'dim');
 }
 
 function cmdTrans(A) {
@@ -2016,6 +1984,7 @@ function loadMission(id) {
   S.t = 0; S.warp = 0; S.burn = null; S.sched = null; S.objects = [];
   S.target = null; S.status = 'flight'; S.att = 'PRO';
   S.completed = false; S.pauseAfterBurn = false;
+  S.solution = null; S.burnSel = { dir:'PRO', at:'AP', dur:0 };
   S.landingAllowed = false; S.thermLimit = 800;
   S.therm.hull = 20; S.ledger = { dvUsed:0, burns:0 };
   S.loads = { HEAT:true, SCI:false, COMM:true };
@@ -2035,6 +2004,7 @@ function loadMission(id) {
   say('');
   if (m.hint) row('PROCEDURE', m.hint, 'ok');
   row('CLOCK', 'HOLD', 'sys');
+  if (typeof gotoPage === 'function') gotoPage('MSN');
   saveProgress();
 }
 
@@ -2065,33 +2035,17 @@ function checkObjectives() {
     const nxt = MISSIONS.find(m => m.id === S.mission.id + 1);
     if (nxt) row('NEXT', `MIS ${nxt.id}   ${nxt.code} ${nxt.name}`, 'sys');
     else row('ROSTER', 'all scripted missions flown', 'sys');
+    say('MISSION COMPLETE · ' + S.mission.code, 'ok');
     markComplete(S.mission.id);
   }
-}
-function cmdObj() {
-  if (!S.mission) return say('NO MISSION LOADED', 'err');
-  head(S.mission.code + ' · OBJECTIVES');
-  if (!S.objectives.length) return say('Free flight — no objectives.', 'sys');
-  S.objectives.forEach((o,i) => say(`  ${o.done ? '✔' : '○'}  ${i+1}. ${o.text}`, o.done ? 'ok' : 'out'));
-  say('');
-  if (S.mission.hint) row('PROCEDURE', S.mission.hint, 'ok');
 }
 function cmdMis(A) {
   if (A[0] !== undefined && A[0] !== '') {
     const n = parseInt(A[0], 10);
-    if (!isNaN(n) && MISSIONS.some(m => m.id === n)) return loadMission(n);
+    if (!isNaN(n) && MISSIONS.some(m => m.id === n)) { loadMission(n); gotoPage('MSN'); return; }
     return say('USAGE   MIS <number>', 'err');
   }
-  head('MISSION ROSTER');
-  const done = loadProgress();
-  for (const m of MISSIONS) {
-    const mark = done.includes(m.id) ? '✔' : ' ';
-    const cur = S.mission && S.mission.id === m.id ? ' ◂ loaded' : '';
-    say(`  ${mark} ${pad('MIS ' + m.id, 8)}${pad(m.code, 7)}${m.name}${cur}`,
-        done.includes(m.id) ? 'ok' : 'out');
-  }
-  say('');
-  say('Missions build on each other and are ordered accordingly.', 'dim');
+  gotoPage('ROSTER');
 }
 </script>
 
@@ -2099,87 +2053,6 @@ function cmdMis(A) {
 /* ============================================================
    HELP
    ============================================================ */
-function cmdHelp(topic) {
-  if (topic === 'ORBIT' || topic === 'PHYSICS') {
-    head('HOW ORBITS BEHAVE');
-    say('An orbit is an ellipse with the planet at one focus. Two numbers describe its size and shape: {apoapsis} (the high point) and {periapsis} (the low point).');
-    say('');
-    say('The one rule worth memorising: {a burn changes the far side of your orbit, not where you are}.', 'key');
-    say('  · Burn PRO at periapsis → apoapsis rises', 'out');
-    say('  · Burn RET at periapsis → apoapsis falls', 'out');
-    say('  · Burn PRO at apoapsis  → periapsis rises', 'out');
-    say('  · Burn RET at apoapsis  → periapsis falls', 'out');
-    say('');
-    say('So circularizing means burning prograde at apoapsis until periapsis catches up. Raising your orbit takes two burns half an orbit apart — a Hohmann transfer.');
-    say('');
-    say('To catch an object ahead of you in the same orbit, burn {retrograde}. That drops you into a lower, shorter-period orbit and you gain on it. Thrusting toward it raises your orbit and you fall behind.', 'warn');
-    return;
-  }
-  if (topic === 'BURN') {
-    head('BURNS');
-    say('BURN <DIR> <SECONDS> [AT PE|AP|T+<s>]');
-    say('  PRO   prograde — along your velocity, raises the opposite apsis', 'out');
-    say('  RET   retrograde — against velocity, lowers the opposite apsis', 'out');
-    say('  ROUT  radial out — away from the planet, rotates the orbit', 'out');
-    say('  RIN   radial in — toward the planet', 'out');
-    say('');
-    say('BURN PRO 42            light the engine now for 42 seconds', 'out');
-    say('BURN PRO 42 AT AP      arm it for the next apoapsis', 'out');
-    say('BURN RET 15 AT T+600   arm it for ten minutes from now', 'out');
-    say('BURN PRO 250 AT XFER MOON   arm it for the next transfer window', 'out');
-    say('CANCEL                 shut down or disarm', 'out');
-    say('');
-    say('An armed burn ignites {half its duration early} so the impulse is centred on the node — that is how it is actually flown.', 'dim');
-    say('Time warp drops to 10× automatically while the engine is lit.', 'dim');
-    return;
-  }
-  if (topic === 'DOCK') {
-    head('RENDEZVOUS & DOCKING');
-    say('1. TGT STATION — set the target.');
-    say('2. PLAN RDV — read the phase angle and orbit difference.');
-    say('3. Stay in a lower orbit until the phase angle closes toward 0°.');
-    say('4. Match the station\'s orbit: PLAN APO <its altitude>, then PLAN CIRC AP.');
-    say('5. Inside 30 km the scope switches to proximity ops. Use DOCK for the approach page.');
-    say('6. TRANS TGT / AWAY / PORT / STBD in tenths of a metre per second.');
-    say('');
-    say('Capture gate: {under 20 m, closing under 0.30 m/s, lateral under 0.10 m/s}.', 'key');
-    say('TRANS NULL cancels all relative motion in one pulse — expensive but it saves a bad approach.', 'dim');
-    return;
-  }
-  head('COMMAND REFERENCE');
-  say('FLIGHT', 'hd');
-  say(pad('STAT',22) + 'primary flight display', 'out');
-  say(pad('NAV',22) + 'full orbital elements', 'out');
-  say(pad('BURN <DIR> <SEC>',22) + 'light the engine  (HELP BURN)', 'out');
-  say(pad('HOLD <DIR>',22) + 'set attitude hold', 'out');
-  say(pad('CANCEL',22) + 'abort or disarm a burn', 'out');
-  say(pad('WARP <n>',22) + 'time warp — 0 holds the clock', 'out');
-  say(pad('TGT <BODY|STATION>',22) + 'set a target', 'out');
-  say('PLANNING', 'hd');
-  say(pad('PLAN',22) + 'maneuver solver', 'key');
-  say(pad('PLAN CIRC AP|PE',22) + 'circularize at an apsis', 'out');
-  say(pad('PLAN APO <km>',22) + 'raise or lower apoapsis', 'out');
-  say(pad('PLAN PERI <km>',22) + 'raise or lower periapsis', 'out');
-  say(pad('PLAN XFER <BODY>',22) + 'transfer + launch window', 'out');
-  say(pad('PLAN ESC',22) + 'escape this sphere of influence', 'out');
-  say(pad('PLAN RDV',22) + 'station phasing', 'out');
-  say('SUBSYSTEMS', 'hd');
-  say(pad('PWR',22) + 'electrical — arrays, battery, loads', 'out');
-  say(pad('FUEL',22) + 'propellant and ΔV budget', 'out');
-  say(pad('THERM',22) + 'hull temperature', 'out');
-  say(pad('COMM',22) + 'range and signal delay', 'out');
-  say(pad('LIFE',22) + 'crew and consumables', 'out');
-  say(pad('DOCK · TRANS',22) + 'proximity ops  (HELP DOCK)', 'out');
-  say('MISSION', 'hd');
-  say(pad('MIS',22) + 'mission roster', 'out');
-  say(pad('LOG',22) + 'objective status', 'out');
-  say(pad('RESTART',22) + 'refly the current mission', 'out');
-  say(pad('CLS',22) + 'clear the scratchpad', 'out');
-  say(pad('FULL',22) + 'fill the screen (or the FULL key, top right)', 'out');
-  say('');
-  say('HELP ORBIT   how a burn reshapes an orbit', 'key');
-  say('HELP BURN · HELP DOCK', 'dim');
-}
 
 /* ============================================================
    PERSISTENCE
@@ -2197,53 +2070,53 @@ function markComplete(id) {
 function saveProgress() { /* roster state only; flight state is not resumed across loads */ }
 
 /* ============================================================
-   QUICK CHIPS
-   ============================================================ */
-const CHIPS = [
-  ['STAT','STAT'], ['NAV','NAV'], ['PLAN','PLAN'], ['W×10','WARP 10'], ['W×100','WARP 100'],
-  ['W×1k','WARP 1000'], ['HOLD','WARP 0'], ['PWR','PWR'], ['FUEL','FUEL'], ['LOG','LOG'],
-  ['MIS','MIS'], ['HELP','HELP'],
-];
-const chipBar = document.getElementById('chips');
-for (const [label, cmd] of CHIPS) {
-  const b = document.createElement('button');
-  b.type = 'button'; b.className = 'chip'; b.textContent = label;
-  if (cmd === 'PLAN' || cmd === 'HELP') b.classList.add('hot');
-  // Keep the caret in the field for mouse and keyboard users, but never pull the
-  // on-screen keyboard up on touch — the chips exist precisely to avoid typing.
-  let via = 'keyboard';
-  b.addEventListener('pointerdown', (ev) => {
-    via = ev.pointerType || 'mouse';
-    if (via !== 'mouse') ev.preventDefault();      // no focus transfer on touch or pen
-  });
-  b.addEventListener('click', () => {
-    exec(cmd);
-    derive(); updateHUD();
-    if (via !== 'touch' && via !== 'pen') input.focus({ preventScroll:true });
-    via = 'keyboard';
-  });
-  chipBar.appendChild(b);
-}
-
-/* ============================================================
-   INPUT
+   SCRATCHPAD INPUT
    ============================================================ */
 const input = document.getElementById('cmd');
+const spEl  = document.getElementById('spmsg');
 const history = []; let hIx = -1;
+
+function syncScratchpad() {
+  const typing = input.value.length > 0;
+  spEl.textContent = (!typing && spMessage) ? spMessage.text : '';
+  spEl.className = 'spmsg ' + (spMessage ? spMessage.sev : 'info');
+}
+input.addEventListener('input', syncScratchpad);
+
 document.getElementById('entry').addEventListener('submit', (ev) => {
   ev.preventDefault();
   const v = input.value;
   if (!v.trim()) return;
   history.push(v); hIx = history.length;
   input.value = '';
-  try { exec(v); } catch (err) { say('Console fault: ' + err.message, 'err'); }
-  derive(); updateHUD();
+  try { exec(v); } catch (err) { say('CONSOLE FAULT: ' + err.message, 'err'); }
+  derive(); updateHUD(); renderCDU(); syncScratchpad();
 });
 input.addEventListener('keydown', (ev) => {
-  if (ev.key === 'ArrowUp')   { ev.preventDefault(); if (hIx > 0) input.value = history[--hIx]; }
+  if (ev.key === 'ArrowUp')   { ev.preventDefault(); if (hIx > 0) input.value = history[--hIx]; syncScratchpad(); }
   if (ev.key === 'ArrowDown') { ev.preventDefault();
-    if (hIx < history.length-1) input.value = history[++hIx]; else { hIx = history.length; input.value = ''; } }
+    if (hIx < history.length-1) input.value = history[++hIx]; else { hIx = history.length; input.value = ''; }
+    syncScratchpad(); }
 });
+// CLR clears the pending message first, then the typed entry — MCDU behaviour
+document.getElementById('clr').addEventListener('pointerdown', (ev) => {
+  if (ev.pointerType !== 'mouse') ev.preventDefault();
+});
+document.getElementById('clr').addEventListener('click', () => {
+  if (spMessage && !input.value) { clearMessage(); return; }
+  input.value = '';
+  syncScratchpad();
+});
+for (const [id, dir] of [['w-dn',-1],['w-up',1]]) {
+  const b = document.getElementById(id);
+  b.addEventListener('pointerdown', (ev) => { if (ev.pointerType !== 'mouse') ev.preventDefault(); });
+  b.addEventListener('click', () => {
+    const i = WARPS.indexOf(S.warp);
+    S.warp = WARPS[Math.max(0, Math.min(WARPS.length-1, (i < 0 ? 1 : i) + dir))];
+    if (S.burn && S.warp > 10) S.warp = 10;
+    clearMessage(); updateHUD();
+  });
+}
 document.getElementById('z-in').addEventListener('click',  () => { view.km /= 1.6; view.auto = false; });
 document.getElementById('z-out').addEventListener('click', () => { view.km *= 1.6; view.auto = false; });
 document.getElementById('z-fit').addEventListener('click', () => fitView());
@@ -2260,8 +2133,8 @@ const fsElement = () => document.fullscreenElement || document.webkitFullscreenE
 const fsAllowed = () => !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
 
 function fsAdvice() {
-  say('FULLSCREEN UNAVAILABLE IN THIS FRAME', 'warn');
-  say('Open this console in its own browser tab and press FULL again.', 'out');
+  say('FULLSCREEN NOT PERMITTED IN THIS FRAME — SEE MSG', 'warn');
+  say('Open this console in its own browser tab and press FULL again.', 'dim');
   say('On iPhone, Safari has no fullscreen mode for web pages at all. Share → Add to Home Screen, then launch it from that icon: it opens without browser chrome, which is the same result.', 'dim');
 }
 
@@ -2286,7 +2159,6 @@ function syncFullscreen() {
   const on = !!fsElement();
   fsBtn.textContent = on ? 'EXIT' : 'FULL';
   fsBtn.setAttribute('aria-label', on ? 'Leave fullscreen' : 'Enter fullscreen');
-  // the viewport changes size after the transition, so re-measure the scope
   resize(); if (view.auto) fitView();
   setTimeout(() => { resize(); if (view.auto) fitView(); }, 120);
 }
@@ -2294,6 +2166,486 @@ for (const ev of ['fullscreenchange', 'webkitfullscreenchange'])
   document.addEventListener(ev, syncFullscreen);
 fsBtn.addEventListener('pointerdown', (ev) => { if (ev.pointerType !== 'mouse') ev.preventDefault(); });
 fsBtn.addEventListener('click', toggleFullscreen);
+
+
+/* ============================================================
+   CDU — paged control & display unit
+
+   Modelled on the Airbus MCDU: a title line carrying the page number, six
+   label/data row pairs split left and right, line-select keys (1L-6L, 1R-6R)
+   adjacent to each row, and a scratchpad line that carries typed entry and
+   system messages. Conventions borrowed from the real thing:
+
+     <TEXT / TEXT>   a line-select key is live for that field
+     TEXT*           the key commits an action
+     small label above large data value
+     cyan  = selectable      amber = data
+     green = computed/active yellow = action required
+
+   Data refreshes once per second, as on a real flight management computer.
+   ============================================================ */
+const CDU = { page: 'ORB', sub: 0 };
+const F = (lab, val, cls, act) => ({ lab: lab || '', val: val == null ? '' : String(val), cls: cls || '', act: act || null });
+const NAV = (text, page) => F('', text, 'sel', page);
+const takeScratch = () => { const v = input.value.trim(); return v; };
+const eatScratch  = () => { const v = input.value.trim(); input.value = ''; syncScratchpad(); return v; };
+
+/* ---- DOM, built once and only updated thereafter ---- */
+const crowsEl = document.getElementById('crows');
+const lskLEl  = document.getElementById('lsk-l');
+const lskREl  = document.getElementById('lsk-r');
+const ROWS = [], LSK = { l: [], r: [] };
+for (let i = 0; i < 6; i++) {
+  const row = document.createElement('div'); row.className = 'crow';
+  const mk = (side) => {
+    const f = document.createElement('div'); f.className = 'fld' + (side === 'r' ? ' right' : '');
+    const lab = document.createElement('div'); lab.className = 'flab';
+    const val = document.createElement('div'); val.className = 'fval';
+    f.appendChild(lab); f.appendChild(val);
+    f.addEventListener('click', () => fire(i, side));
+    return { f, lab, val };
+  };
+  const L = mk('l'), R = mk('r');
+  row.appendChild(L.f); row.appendChild(R.f);
+  crowsEl.appendChild(row);
+  ROWS.push({ row, L, R });
+  for (const side of ['l', 'r']) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'lsk';
+    b.textContent = side === 'l' ? '‹' : '›';
+    b.setAttribute('aria-label', `Line select ${i+1}${side.toUpperCase()}`);
+    b.addEventListener('pointerdown', (ev) => { if (ev.pointerType !== 'mouse') ev.preventDefault(); });
+    b.addEventListener('click', () => fire(i, side));
+    (side === 'l' ? lskLEl : lskREl).appendChild(b);
+    LSK[side].push(b);
+  }
+}
+
+let CURRENT = [];                       // rows as last rendered, for hit-testing
+function fire(i, side) {
+  const row = CURRENT[i]; if (!row) return;
+  const fld = row.full ? (side === 'l' ? row.full : null) : row[side];
+  if (!fld || !fld.act) return;
+  clearMessage();
+  if (typeof fld.act === 'string') gotoPage(fld.act);
+  else { fld.act(); }
+  derive(); updateHUD(); renderCDU();
+}
+
+function gotoPage(id, sub) {
+  if (!PAGES[id]) return;
+  CDU.page = id; CDU.sub = sub || 0;
+  renderCDU();
+}
+
+function renderCDU() {
+  const def = PAGES[CDU.page] || PAGES.ORB;
+  derive();
+  const count = def.count ? Math.max(1, def.count()) : 1;
+  if (CDU.sub >= count) CDU.sub = count - 1;
+  if (CDU.sub < 0) CDU.sub = 0;
+  let rows = [];
+  try { rows = def.build(CDU.sub) || []; }
+  catch (err) { rows = [{ full: F('FAULT', String(err.message).slice(0, 40), 'bad') }]; }
+
+  document.getElementById('cdu-t').textContent = def.title(CDU.sub);
+  document.getElementById('cdu-sub').textContent = def.sub ? def.sub() : '';
+  document.getElementById('cdu-pg').textContent = count > 1 ? `${CDU.sub+1}/${count}` : '';
+  document.getElementById('pg-prev').disabled = count < 2;
+  document.getElementById('pg-next').disabled = count < 2;
+
+  CURRENT = rows;
+  for (let i = 0; i < 6; i++) {
+    const r = rows[i], node = ROWS[i];
+    node.row.classList.toggle('full', !!(r && r.full));
+    const put = (cell, fld) => {
+      cell.lab.textContent = fld ? fld.lab : '';
+      cell.val.textContent = fld ? fld.val : '';
+      cell.val.className = 'fval ' + (fld ? fld.cls : '');
+      cell.f.classList.toggle('tap', !!(fld && fld.act));
+      cell.f.style.display = '';
+    };
+    if (r && r.full) {
+      put(node.L, r.full); put(node.R, null); node.R.f.style.display = 'none';
+    } else {
+      put(node.L, r ? r.l : null); put(node.R, r ? r.r : null);
+    }
+    const mark = (btn, fld, side) => {
+      const on = !!(fld && fld.act);
+      const go = on && /\*$/.test(fld.val);
+      btn.className = 'lsk' + (go ? ' go' : on ? ' on' : '');
+      btn.textContent = on ? (side === 'l' ? '‹' : '›') : '·';
+      btn.disabled = !on;
+    };
+    mark(LSK.l[i], r ? (r.full ? r.full : r.l) : null, 'l');
+    mark(LSK.r[i], r && !r.full ? r.r : null, 'r');
+  }
+  markPageKey();
+}
+
+/* ---- function keys: page selection only, never an action ---- */
+const PAGEKEYS = [['ORB','ORB'],['PLAN','PLAN'],['BURN','BURN'],['TGT','TGT'],['DOCK','DOCK'],['MSN','MSN'],
+                  ['PWR','PWR'],['FUEL','FUEL'],['THRM','THRM'],['COMM','COMM'],['LIFE','LIFE'],['MENU','MENU']];
+const pkBar = document.getElementById('pagekeys');
+const PKBTN = {};
+for (const [label, id] of PAGEKEYS) {
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'pk'; b.textContent = label;
+  b.addEventListener('pointerdown', (ev) => { if (ev.pointerType !== 'mouse') ev.preventDefault(); });
+  b.addEventListener('click', () => { clearMessage(); gotoPage(id); });
+  pkBar.appendChild(b); PKBTN[id] = b;
+}
+function markPageKey() {
+  for (const id in PKBTN) PKBTN[id].classList.toggle('cur', CDU.page === id);
+}
+for (const [id, dir] of [['pg-prev',-1],['pg-next',1]]) {
+  const b = document.getElementById(id);
+  b.addEventListener('pointerdown', (ev) => { if (ev.pointerType !== 'mouse') ev.preventDefault(); });
+  b.addEventListener('click', () => { CDU.sub += dir; renderCDU(); });
+}
+
+/* ---- shared row helpers ---- */
+const one = (t) => ({ count: () => 1, title: () => t });
+const menuRow = (rightText, rightPage) => ({ l: NAV('<MENU', 'MENU'),
+  r: rightPage ? NAV(rightText, rightPage) : null });
+const dv = () => fmtDV(dvRemaining());
+
+/* ---- solution → armed burn ---- */
+function armSolution() {
+  const sol = S.solution;
+  if (!sol) return say('NO SOLUTION COMPUTED', 'warn');
+  if (sol.secs == null || !isFinite(sol.secs) || sol.secs <= 0) return say('SOLUTION NOT EXECUTABLE', 'err');
+  if (sol.node === 'PE' || sol.node === 'AP') {
+    S.sched = { dir: sol.dir, dur: sol.secs, at: sol.node };
+    say(`BURN ARMED · ${DIRNAME[sol.dir]} ${sol.secs.toFixed(1)} s at ${sol.node === 'PE' ? 'periapsis' : 'apoapsis'}`, 'ok');
+  } else if (sol.node === 'T') {
+    S.sched = { dir: sol.dir, dur: sol.secs, at: 'T', when: sol.when };
+    say(`BURN ARMED · ${DIRNAME[sol.dir]} ${sol.secs.toFixed(1)} s at T+${(sol.when - S.t).toFixed(0)} s`, 'ok');
+  } else {
+    startBurn(sol.dir, sol.secs);
+  }
+  S.burnSel.dir = sol.dir; S.burnSel.dur = sol.secs;
+  if (sol.node) S.burnSel.at = sol.node;
+  gotoPage('BURN');
+}
+function planThen(fn) { return () => { fn(); if (S.solution) gotoPage('PLANR'); }; }
+function numFromScratch(what) {
+  const v = eatScratch();
+  const n = parseFloat(v);
+  if (!v) { say(`ENTER ${what} IN THE SCRATCHPAD FIRST`, 'warn'); return null; }
+  if (!isFinite(n)) { say('ENTRY OUT OF RANGE', 'err'); return null; }
+  return n;
+}
+
+const PAGES = {
+
+ORB: { count: () => 2, title: (i) => i ? 'ORBIT' : 'ORBIT',
+  sub: () => soiBody().name,
+  build: (i) => i === 0 ? [
+    { l: F('Apoapsis', D.escape ? 'ESCAPE' : fmtDist(D.apoAlt)),
+      r: F('T−Apo', isFinite(D.tApo) ? fmtT(D.tApo) : '——', '', null) },
+    { l: F('Periapsis', fmtDist(D.perAlt), D.perAlt < 0 ? 'bad' : ''),
+      r: F('T−Peri', isFinite(D.tPeri) ? fmtT(D.tPeri) : '——') },
+    { l: F('Altitude', fmtDist(D.alt)), r: F('Velocity', fmtVel(D.e.v)) },
+    { l: F('Eccentricity', D.e.e.toFixed(5)), r: F('Period', D.e.period === Infinity ? '——' : fmtT(D.e.period)) },
+    { l: F('ΔV remaining', dv(), 'ok'), r: F('Total mass', craftMass().toFixed(0) + ' kg') },
+    menuRow('PLAN>', 'PLAN'),
+  ] : [
+    { l: F('Semi-major a', isFinite(D.e.a) ? fmtDist(D.e.a) : '∞'), r: F('Spec. energy', D.e.energy.toFixed(4)) },
+    { l: F('Arg of periapsis', (normAngle(D.e.argp)*180/Math.PI).toFixed(1) + '°'),
+      r: F('True anomaly', (D.e.nu*180/Math.PI).toFixed(1) + '°') },
+    { l: F('V-circular', fmtVel(vCirc(soiBody().mu, D.e.r))), r: F('V-escape', fmtVel(Math.sqrt(2*soiBody().mu/D.e.r))) },
+    { l: F('Vertical rate', fmtVel(D.e.vr)), r: F('Direction', D.e.dir > 0 ? 'PROGRADE' : 'RETROGRADE') },
+    { l: F('SOI radius', isFinite(soiBody().soi) ? fmtDist(soiBody().soi) : '——'),
+      r: F('Ang momentum', Math.abs(D.e.h).toFixed(0)) },
+    menuRow('PLAN>', 'PLAN'),
+  ] },
+
+PLAN: Object.assign(one('MANEUVER'), { sub: () => 'SOLVER', build: () => [
+  { l: F('', '<CIRC AT APO', 'sel', planThen(() => cmdPlan(['CIRC','AP']))),
+    r: F('', 'CIRC AT PERI>', 'sel', planThen(() => cmdPlan(['CIRC','PE']))) },
+  { l: F('km into scratchpad', '<SET APOAPSIS', 'sel', planThen(() => { const n = numFromScratch('APOAPSIS ALTITUDE'); if (n != null) cmdPlan(['APO', String(n)]); })),
+    r: F('km into scratchpad', 'SET PERIAPSIS>', 'sel', planThen(() => { const n = numFromScratch('PERIAPSIS ALTITUDE'); if (n != null) cmdPlan(['PERI', String(n)]); })) },
+  { l: F('', '<ESCAPE SOI', 'sel', planThen(() => cmdPlan(['ESC']))),
+    r: F('body into scratchpad', 'TRANSFER>', 'sel', planThen(() => {
+        const v = eatScratch().toUpperCase();
+        if (!v) return say('ENTER A BODY NAME IN THE SCRATCHPAD FIRST', 'warn');
+        cmdPlan(['XFER', v]); })) },
+  { l: S.objects.some(o => o.id === 'STATION') ? F('', '<RENDEZVOUS', 'sel', planThen(() => cmdPlan(['RDV']))) : F('', '', 'dim'),
+    r: S.solution ? F('Last solution', 'REVIEW>', 'sel', 'PLANR') : F('Last solution', 'NONE', 'dim') },
+  { l: F('ΔV remaining', dv(), 'ok'), r: F('Reference', soiBody().name) },
+  menuRow('BURN>', 'BURN'),
+] }),
+
+PLANR: Object.assign(one('SOLUTION'), {
+  sub: () => S.solution ? S.solution.name : '',
+  build: () => {
+    const s0 = S.solution;
+    if (!s0) return [{ full: F('', 'NO SOLUTION — RETURN TO PLAN', 'dim') }, {}, {}, {}, {},
+                     { l: NAV('<PLAN', 'PLAN') }];
+    const tt = s0.node === 'AP' ? D.tApo : s0.node === 'PE' ? D.tPeri
+             : s0.node === 'T' ? s0.when - S.t : NaN;
+    const affordable = s0.dv <= dvRemaining();
+    return [
+      { l: F('ΔV required', fmtDV(s0.dv), affordable ? 'ok' : 'bad'),
+        r: F('Burn time', s0.secs != null ? s0.secs.toFixed(1) + ' s' : 'N/A', s0.secs != null ? '' : 'bad') },
+      { l: F('Direction', DIRNAME[s0.dir].toUpperCase()),
+        r: F('Ignition at', s0.nodeLabel || '—') },
+      { l: F('Time to ignition', isFinite(tt) ? fmtT(tt) : '——', 'go'),
+        r: F('ΔV remaining', dv(), 'ok') },
+      { full: F('Predicted', s0.detail || '', 'ok') },
+      { l: F('Prop required', s0.prop != null ? s0.prop.toFixed(1) + ' kg' : '—'),
+        r: F('Prop aboard', S.craft.fuel.toFixed(1) + ' kg') },
+      { l: NAV('<PLAN', 'PLAN'),
+        r: s0.secs != null ? F('', 'ARM BURN*', 'go', armSolution) : F('', 'NOT EXECUTABLE', 'bad') },
+    ];
+  } }),
+
+BURN: Object.assign(one('BURN'), {
+  sub: () => S.burn ? 'ENGINE RUNNING' : S.sched ? 'ARMED' : 'STANDBY',
+  build: () => {
+    const dirs = ['PRO','RET','RIN','ROUT'], nodes = ['AP','PE','NOW'];
+    const cycle = (arr, cur, set) => () => set(arr[(arr.indexOf(cur) + 1) % arr.length]);
+    const sel = S.burnSel;
+    const prev = sel.dur > 0 ? fmtDV(burnDV(sel.dur)) : '—';
+    return [
+      { l: F('Direction', sel.dir, 'sel', cycle(dirs, sel.dir, (v) => sel.dir = v)),
+        r: F('Ignition node', sel.at, 'sel', cycle(nodes, sel.at, (v) => sel.at = v)) },
+      { l: F('Duration  s ⇦ scratchpad', sel.dur ? sel.dur.toFixed(1) + ' s' : '□□□', sel.dur ? 'sel' : 'go',
+            () => { const n = numFromScratch('BURN DURATION, SECONDS'); if (n != null && n > 0) sel.dur = n; }),
+        r: F('ΔV this burn', prev) },
+      { l: F('Engine', S.burn ? DIRNAME[S.burn.dir].toUpperCase() + ' ' + S.burn.left.toFixed(1) + ' s' : 'OFF',
+            S.burn ? 'go' : 'dim'),
+        r: F('ΔV remaining', dv(), 'ok') },
+      { l: F('Armed', S.sched ? `${DIRNAME[S.sched.dir]} ${S.sched.dur.toFixed(1)} s` : 'NONE', S.sched ? 'go' : 'dim'),
+        r: F('Time to ignition', S.sched ? fmtT(timeToIgnition()) : '——', S.sched ? 'go' : 'dim') },
+      { l: F('Prop aboard', S.craft.fuel.toFixed(1) + ' kg'),
+        r: F('Full throttle left', fmtT(S.craft.fuel / (S.craft.thrust*1000/(S.craft.isp*G0)))) },
+      { l: NAV('<MENU', 'MENU'),
+        r: (S.burn || S.sched) ? F('', 'CANCEL*', 'go', () => exec('CANCEL'))
+           : F('', 'ARM*', 'go', () => {
+               if (!sel.dur) return say('SET A BURN DURATION FIRST', 'warn');
+               if (sel.at === 'NOW') startBurn(sel.dir, sel.dur);
+               else exec(`BURN ${sel.dir} ${sel.dur} AT ${sel.at}`); }) },
+    ];
+  } }),
+
+TGT: Object.assign(one('TARGET'), {
+  sub: () => S.target || 'NONE',
+  build: () => {
+    const t = targetRel();
+    const set = (k) => () => exec('TGT ' + k);
+    const opt = (k) => S.target === k ? 'ok' : 'sel';
+    return [
+      { l: F('', '<MOON', opt('MOON'), set('MOON')), r: F('', 'MARS>', opt('MARS'), set('MARS')) },
+      { l: F('', '<VENUS', opt('VENUS'), set('VENUS')), r: F('', 'SUN>', opt('SUN'), set('SUN')) },
+      { l: F('', '<EARTH', opt('EARTH'), set('EARTH')),
+        r: S.objects.some(o => o.id === 'STATION') ? F('', 'STATION>', opt('STATION'), set('STATION'))
+                                                   : F('', 'NO STATION', 'dim') },
+      { l: F('Target', S.target || 'NONE', S.target ? 'ok' : 'dim'),
+        r: F('Range', t ? fmtDist(V.len(t.r)) : '——') },
+      { l: F('Relative velocity', t ? fmtVel(V.len(t.v)) : '——'),
+        r: F('Closing rate', t ? fmtVel(-V.dot(V.unit(t.r), t.v)) : '——') },
+      { l: NAV('<MENU', 'MENU'), r: S.target ? F('', 'CLEAR>', 'sel', () => exec('TGT')) : null },
+    ];
+  } }),
+
+DOCK: Object.assign(one('PROXIMITY OPS'), {
+  sub: () => S.target || 'NO TARGET',
+  build: () => {
+    const t = targetRel();
+    if (!t) return [{ full: F('', 'NO TARGET SELECTED', 'dim') },
+                    { full: F('', 'SELECT ONE ON THE TARGET PAGE', 'dim') }, {}, {},
+                    {}, { l: NAV('<MENU', 'MENU'), r: NAV('TARGET>', 'TGT') }];
+    const rng = V.len(t.r), closing = -V.dot(V.unit(t.r), t.v);
+    const lat = Math.abs(V.crs(V.unit(t.r), t.v));
+    const pulse = (mode, amt) => () => exec(`TRANS ${mode} ${amt}`);
+    const eta = closing > 1e-6 ? rng/closing : Infinity;
+    return [
+      { l: F('Range', rng < 1 ? (rng*1000).toFixed(1) + ' m' : fmtDist(rng), rng*1000 < 20 ? 'ok' : ''),
+        r: F('Closing rate', fmtVel(closing), closing > 0 ? 'ok' : 'go') },
+      { l: F('Lateral rate', fmtVel(lat), lat*1000 > 0.1 ? 'go' : 'ok'),
+        r: F('Contact in', isFinite(eta) ? fmtT(eta) : '——') },
+      { l: F('0.10 m/s', '<TOWARD', 'sel', pulse('TGT', 0.1)),
+        r: F('0.10 m/s', 'AWAY>', 'sel', pulse('AWAY', 0.1)) },
+      { l: F('0.05 m/s', '<PORT', 'sel', pulse('PORT', 0.05)),
+        r: F('0.05 m/s', 'STBD>', 'sel', pulse('STBD', 0.05)) },
+      { l: F('', '<NULL RELATIVE*', 'go', () => exec('TRANS NULL')),
+        r: F('RCS ΔV', fmtDV(rcsDV())) },
+      { l: NAV('<MENU', 'MENU'), r: F('Gate', '20 m · 0.30 m/s', 'dim') },
+    ];
+  } }),
+
+PWR: Object.assign(one('ELECTRICAL'), {
+  sub: () => D.ecl ? 'ECLIPSE' : 'SUNLIT',
+  build: () => {
+    const pct = S.power.batt / S.power.battMax * 100;
+    const tog = (k) => () => exec(`PWR ${k} ${S.loads[k] ? 'OFF' : 'ON'}`);
+    const net = D.gen - D.load;
+    return [
+      { l: F('Array output', D.gen.toFixed(0) + ' W', D.ecl ? 'go' : 'ok'),
+        r: F('Bus load', D.load.toFixed(0) + ' W') },
+      { l: F('Net', (net >= 0 ? '+' : '') + net.toFixed(0) + ' W', net < 0 ? 'go' : 'ok'),
+        r: F('Battery', `${pct.toFixed(0)}%`, pct < 20 ? 'bad' : pct < 50 ? 'go' : 'ok') },
+      { l: F('Charge', `${S.power.batt.toFixed(0)} / ${S.power.battMax} Wh`),
+        r: F('Endurance', net < 0 ? fmtT(S.power.batt / -net * 3600) : '——', net < 0 ? 'go' : '') },
+      { l: F('Heaters', S.loads.HEAT ? 'ON' : 'OFF', S.loads.HEAT ? 'sel' : 'dim', tog('HEAT')),
+        r: F('Transmitter', S.loads.COMM ? 'ON' : 'OFF', S.loads.COMM ? 'sel' : 'dim', tog('COMM')) },
+      { l: F('Science', S.loads.SCI ? 'ON' : 'OFF', S.loads.SCI ? 'sel' : 'dim', tog('SCI')),
+        r: F('Solar flux', D.flux.toFixed(0) + ' W/m²') },
+      menuRow('FUEL>', 'FUEL'),
+    ];
+  } }),
+
+FUEL: Object.assign(one('PROPULSION'), { sub: () => S.craft.name, build: () => {
+  const pct = S.craft.fuelMax ? S.craft.fuel/S.craft.fuelMax*100 : 0;
+  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  return [
+    { l: F('Main propellant', `${S.craft.fuel.toFixed(1)} kg`, pct < 15 ? 'go' : ''),
+      r: F('Remaining', `${pct.toFixed(1)}%`, pct < 15 ? 'go' : 'ok') },
+    { l: F('ΔV remaining', dv(), 'ok'), r: F('ΔV expended', fmtDV(S.ledger.dvUsed)) },
+    { l: F('Engine thrust', (S.craft.thrust*1000).toFixed(0) + ' N'), r: F('Specific impulse', S.craft.isp + ' s') },
+    { l: F('Flow rate', mdot.toFixed(3) + ' kg/s'), r: F('Full throttle left', fmtT(S.craft.fuel/mdot)) },
+    { l: F('Dry mass', S.craft.dry.toFixed(0) + ' kg'), r: F('RCS propellant', S.craft.rcs.toFixed(2) + ' kg') },
+    menuRow('BURN>', 'BURN'),
+  ]; } }),
+
+THRM: Object.assign(one('THERMAL'), { sub: () => D.ecl ? 'ECLIPSE' : 'SUNLIT', build: () => {
+  const tl = S.thermLimit || 800, h = S.therm.hull;
+  return [
+    { l: F('Hull temperature', h.toFixed(1) + ' °C', h > tl*0.8 ? 'bad' : h > tl*0.4 ? 'go' : 'ok'),
+      r: F('Structural limit', tl + ' °C') },
+    { l: F('Solar flux', D.flux.toFixed(0) + ' W/m²'), r: F('Relative to Earth', (D.flux/1361).toFixed(2) + '×') },
+    { l: F('Solar distance', (D.dSun/AU).toFixed(4) + ' AU'), r: F('Illumination', D.ecl ? 'ECLIPSE' : 'SUNLIT') },
+    { full: h > tl*0.55 ? F('', 'RAISE PERIAPSIS — HEAT RISES WITH INVERSE SQUARE', 'go') : F('', '', 'dim') },
+    {},
+    menuRow('POWER>', 'PWR'),
+  ]; } }),
+
+COMM: Object.assign(one('COMMUNICATIONS'), { sub: () => S.loads.COMM ? 'TX ON' : 'TX OFF', build: () => {
+  const sig = 1e6 / Math.max(D.dEarth, 1)**2 * 1e6;
+  return [
+    { l: F('Range to Earth', fmtDist(D.dEarth)),
+      r: F('One-way delay', D.lightTime < 1 ? (D.lightTime*1000).toFixed(0)+' ms' : fmtT(D.lightTime)) },
+    { l: F('Round trip', D.lightTime < 1 ? (D.lightTime*2000).toFixed(0)+' ms' : fmtT(D.lightTime*2)),
+      r: F('Signal', S.loads.COMM ? (sig > 1 ? 'STRONG' : sig > 0.02 ? 'USABLE' : 'MARGINAL') : 'TX OFF',
+           S.loads.COMM ? 'ok' : 'go') },
+    { l: F('Data rate', S.loads.COMM ? Math.max(0.1, Math.min(2048, sig*40)).toFixed(1) + ' kbps' : '—'),
+      r: F('Transmitter', S.loads.COMM ? 'ON' : 'OFF', S.loads.COMM ? 'sel' : 'dim',
+           () => exec(`PWR COMM ${S.loads.COMM ? 'OFF' : 'ON'}`)) },
+    {}, {},
+    menuRow('POWER>', 'PWR'),
+  ]; } }),
+
+LIFE: Object.assign(one('LIFE SUPPORT'), { sub: () => S.craft.crew ? S.craft.crew + ' CREW' : 'UNCREWED', build: () => {
+  if (!S.craft.crew) return [{ full: F('', 'UNCREWED VEHICLE', 'dim') }, {}, {}, {}, {}, menuRow('POWER>', 'PWR')];
+  const hrs = S.craft.o2 / S.craft.crew;
+  return [
+    { l: F('Crew', String(S.craft.crew)), r: F('O₂ remaining', fmtT(hrs*3600), hrs < 24 ? 'go' : 'ok') },
+    { l: F('Cabin pressure', S.power.batt > 0 ? '101.3 kPa' : 'LOST', S.power.batt > 0 ? 'ok' : 'bad'),
+      r: F('Cabin temperature', S.power.batt > 0 ? '21.1 °C' : '—') },
+    { l: F('CO₂ scrubber', S.loads.HEAT ? 'NOMINAL' : 'OFFLINE', S.loads.HEAT ? 'ok' : 'bad'),
+      r: F('Crew-hours', S.craft.o2.toFixed(0)) },
+    {}, {},
+    menuRow('POWER>', 'PWR'),
+  ]; } }),
+
+MSN: {
+  count: () => S.mission ? 2 : 1,
+  title: () => 'MISSION',
+  sub: () => S.mission ? S.mission.code : 'NONE',
+  build: (pg) => {
+    if (!S.mission) return [{ full: F('', 'NO MISSION LOADED', 'dim') }, {}, {}, {},
+                            { l: NAV('<ROSTER', 'ROSTER') }, menuRow()];
+    if (pg === 1) {
+      const lines = (S.mission.brief.join(' ').replace(/[{}]/g, '').match(/.{1,44}(\s|$)/g) || []);
+      const rows = lines.slice(0, 5).map(t => ({ full: F('', t.trim(), 'dim') }));
+      while (rows.length < 5) rows.push({});
+      rows.push({ l: NAV('<OBJECTIVES', 'MSN'), r: F('Procedure', S.mission.hint || '', 'ok') });
+      return rows;
+    }
+    const o = S.objectives;
+    return [
+      { full: F('Mission', S.mission.name, 'ok') },
+      o[0] ? { full: F(o[0].done ? 'MET' : 'OPEN', (o[0].done ? '✔ ' : '○ ') + o[0].text, o[0].done ? 'ok' : '') } : {},
+      o[1] ? { full: F(o[1].done ? 'MET' : 'OPEN', (o[1].done ? '✔ ' : '○ ') + o[1].text, o[1].done ? 'ok' : '') } : {},
+      o[2] ? { full: F(o[2].done ? 'MET' : 'OPEN', (o[2].done ? '✔ ' : '○ ') + o[2].text, o[2].done ? 'ok' : '') } : {},
+      { l: F('Elapsed', fmtMET(S.t)), r: F('ΔV expended', fmtDV(S.ledger.dvUsed)) },
+      { l: NAV('<ROSTER', 'ROSTER'), r: F('', 'RESTART*', 'go', () => exec('RESTART')) },
+    ];
+  } },
+
+ROSTER: { count: () => Math.ceil(MISSIONS.length / 5), title: () => 'MISSION ROSTER',
+  sub: () => '', build: (pg) => {
+    const done = loadProgress();
+    const slice = MISSIONS.slice(pg*5, pg*5 + 5);
+    const rows = slice.map(m => ({ full: F(done.includes(m.id) ? 'FLOWN' : '',
+      `<${m.code}  ${m.name}`, S.mission && S.mission.id === m.id ? 'ok' : 'sel',
+      () => { loadMission(m.id); gotoPage('MSN'); }) }));
+    while (rows.length < 5) rows.push({});
+    rows.push({ l: NAV('<MISSION', 'MSN'), r: NAV('MENU>', 'MENU') });
+    return rows;
+  } },
+
+MSG: { count: () => Math.max(1, Math.ceil(MSGS.length / 5)), title: () => 'MESSAGES',
+  sub: () => MSGS.length + ' LOGGED', build: (pg) => {
+    const rev = MSGS.slice().reverse();
+    const slice = rev.slice(pg*5, pg*5 + 5);
+    const rows = slice.map(m => ({ full: F(fmtMET(m.t).slice(4),
+      m.text.length > 46 ? m.text.slice(0, 45) + '…' : m.text,
+      m.cls === 'err' ? 'bad' : m.cls === 'warn' ? 'go' : m.cls === 'ok' ? 'ok' : m.cls === 'dim' ? 'dim' : '') }));
+    while (rows.length < 5) rows.push({});
+    rows.push({ l: NAV('<MENU', 'MENU'), r: F('', 'CLEAR ALL*', 'go', () => { MSGS.length = 0; clearMessage(); }) });
+    return rows;
+  } },
+
+MENU: { count: () => 2, title: () => 'INDEX', sub: () => '', build: (pg) => pg === 0 ? [
+    { l: NAV('<ORBIT', 'ORB'), r: NAV('MANEUVER>', 'PLAN') },
+    { l: NAV('<BURN', 'BURN'), r: NAV('TARGET>', 'TGT') },
+    { l: NAV('<PROXIMITY OPS', 'DOCK'), r: NAV('MISSION>', 'MSN') },
+    { l: NAV('<MESSAGES', 'MSG'), r: NAV('HELP>', 'HELP') },
+    { l: F('Reference', soiBody().name), r: F('MET', fmtMET(S.t)) },
+    { l: F('', '', 'dim'), r: F('', '', 'dim') },
+  ] : [
+    { l: NAV('<ELECTRICAL', 'PWR'), r: NAV('PROPULSION>', 'FUEL') },
+    { l: NAV('<THERMAL', 'THRM'), r: NAV('COMMUNICATIONS>', 'COMM') },
+    { l: NAV('<LIFE SUPPORT', 'LIFE'), r: NAV('ROSTER>', 'ROSTER') },
+    {}, {},
+    { l: NAV('<ORBIT', 'ORB'), r: F('', '', 'dim') },
+  ] },
+
+HELP: { count: () => HELP_PAGES.length, title: () => 'REFERENCE', sub: () => HELP_PAGES[CDU.sub].t,
+  build: (pg) => {
+    const rows = HELP_PAGES[pg].rows.map(r => ({ full: F(r[0], r[1], r[2] || '') }));
+    while (rows.length < 5) rows.push({});
+    rows.push({ l: NAV('<MENU', 'MENU'), r: NAV('ORBIT>', 'ORB') });
+    return rows;
+  } },
+};
+
+const HELP_PAGES = [
+  { t: 'HOW ORBITS BEHAVE', rows: [
+    ['RULE', 'A burn changes the FAR side of the orbit', 'ok'],
+    ['', 'PRO at periapsis  → apoapsis rises'],
+    ['', 'PRO at apoapsis   → periapsis rises'],
+    ['', 'RET at apoapsis   → periapsis falls'],
+    ['CATCH-UP', 'Burn RET to catch something ahead', 'go'],
+  ] },
+  { t: 'LINE SELECT KEYS', rows: [
+    ['', 'Keys beside each row act on that row.'],
+    ['<TEXT', 'left key is live for that field', 'sel'],
+    ['TEXT>', 'right key is live', 'sel'],
+    ['TEXT*', 'key commits an action', 'go'],
+    ['ENTRY', 'Type a value, then press its key.'],
+  ] },
+  { t: 'TYPED COMMANDS', rows: [
+    ['BURN', 'BURN <DIR> <SEC> [AT PE|AP|T+n]'],
+    ['WARP', 'WARP <rate>   or the rail arrows'],
+    ['PLAN', 'PLAN CIRC AP · APO <km> · XFER <BODY>'],
+    ['TRANS', 'TRANS TGT|AWAY|PORT|STBD <m/s>'],
+    ['PAGES', 'Function keys below, or type the name.'],
+  ] },
+];
 
 /* ============================================================
    MAIN LOOP
@@ -2308,7 +2660,10 @@ function frame(ts) {
   derive();
   updateHUD();
   draw();
+  // pages refresh at 1 Hz, as a flight management computer does
+  if (ts - lastCDU >= 1000) { lastCDU = ts; renderCDU(); markPageKey(); }
 }
+let lastCDU = 0;
 
 /* ============================================================
    BOOT
@@ -2321,6 +2676,7 @@ function boot(restored) {
     const done = loadProgress();
     if (done.length) row('FLIGHT RECORD', `${done.length} mission${done.length>1?'s':''} flown`, 'sys');
   }
+  renderCDU(); markPageKey(); syncScratchpad();
   requestAnimationFrame(frame);
   if (window.matchMedia('(min-width: 860px)').matches &&
       window.matchMedia('(pointer: fine)').matches) input.focus({preventScroll:true});
