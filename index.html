@@ -32,7 +32,7 @@ body{
 }
 #app{
   height:100dvh;display:flex;flex-direction:column;
-  padding:0 max(10px,env(safe-area-inset-left)) 6px max(10px,env(safe-area-inset-right));
+  padding:env(safe-area-inset-top) max(10px,env(safe-area-inset-left)) 6px max(10px,env(safe-area-inset-right));
   gap:8px;max-width:1400px;margin:0 auto;width:100%;
 }
 
@@ -57,6 +57,14 @@ body{
 .lamp.ok{color:var(--nominal);border-color:#1E5A48;background:#0B1F1A}
 .lamp.caution{color:var(--caution);border-color:#5C4B15;background:#1F1A08;animation:pulse 1.4s ease-in-out infinite}
 .lamp.crit{color:var(--critical);border-color:#6B2418;background:#1F0D0A;animation:pulse .7s steps(2,end) infinite}
+.railbtn{
+  align-self:center;flex:0 0 auto;margin-left:7px;background:#0B121B;
+  border:1px solid var(--rule);color:var(--slate);font-family:var(--f-disp);
+  font-size:8.5px;font-weight:700;letter-spacing:.11em;padding:9px 9px;
+  border-radius:2px;cursor:pointer;white-space:nowrap;-webkit-tap-highlight-color:transparent;
+}
+.railbtn:active,.railbtn:focus-visible{background:var(--panel-2);color:var(--amber);border-color:var(--amber-dim);outline:none}
+
 @media (max-width:600px){
   .rail-cell{padding-right:7px}
   .rail-cell + .rail-cell{padding-left:7px}
@@ -64,7 +72,8 @@ body{
   .rail-v{font-size:12px}
   .rail-v.small{font-size:11px}
   #cell-dv{display:none}
-  .lamp{font-size:8px;padding:3px 6px;letter-spacing:.07em}
+  .lamp{font-size:8px;padding:3px 6px;letter-spacing:.07em;max-width:34vw}
+  .railbtn{font-size:8px;padding:8px 7px;margin-left:5px;letter-spacing:.08em}
 }
 @keyframes pulse{50%{opacity:.35}}
 @media (prefers-reduced-motion:reduce){.lamp{animation:none!important}}
@@ -207,6 +216,7 @@ button:focus-visible,input:focus-visible{outline:1px solid var(--amber);outline-
     <div class="rail-cell" id="cell-dv"><span class="rail-k">ΔV Rem</span><span class="rail-v small" id="r-dv">0</span></div>
     <div class="rail-spacer"></div>
     <div class="lamp ok" id="r-lamp">NOMINAL</div>
+    <button class="railbtn" id="fs" type="button" aria-label="Toggle fullscreen">FULL</button>
   </div>
 
   <div class="deck">
@@ -1186,6 +1196,7 @@ function exec(raw) {
     if (!S.mission) return say('NO MISSION LOADED', 'err');
     return loadMission(S.mission.id);
   }
+  case 'FULL': case 'FS': { toggleFullscreen(); return; }
   case 'CLS': case 'CLEAR': { logEl.innerHTML = ''; return; }
   case 'LAND': {
     S.landingAllowed = !S.landingAllowed;
@@ -2164,6 +2175,7 @@ function cmdHelp(topic) {
   say(pad('LOG',22) + 'objective status', 'out');
   say(pad('RESTART',22) + 'refly the current mission', 'out');
   say(pad('CLS',22) + 'clear the scratchpad', 'out');
+  say(pad('FULL',22) + 'fill the screen (or the FULL key, top right)', 'out');
   say('');
   say('HELP ORBIT   how a burn reshapes an orbit', 'key');
   say('HELP BURN · HELP DOCK', 'dim');
@@ -2235,6 +2247,53 @@ input.addEventListener('keydown', (ev) => {
 document.getElementById('z-in').addEventListener('click',  () => { view.km /= 1.6; view.auto = false; });
 document.getElementById('z-out').addEventListener('click', () => { view.km *= 1.6; view.auto = false; });
 document.getElementById('z-fit').addEventListener('click', () => fitView());
+
+/* ============================================================
+   FULLSCREEN
+   The page runs inside an artifact frame, so the Fullscreen API is only
+   available when that frame permits it (document.fullscreenEnabled reports
+   this). iPhone Safari has no page fullscreen at all. Where it cannot work,
+   say what does instead rather than failing silently.
+   ============================================================ */
+const fsBtn = document.getElementById('fs');
+const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+const fsAllowed = () => !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+
+function fsAdvice() {
+  say('FULLSCREEN UNAVAILABLE IN THIS FRAME', 'warn');
+  say('Open this console in its own browser tab and press FULL again.', 'out');
+  say('On iPhone, Safari has no fullscreen mode for web pages at all. Share → Add to Home Screen, then launch it from that icon: it opens without browser chrome, which is the same result.', 'dim');
+}
+
+async function toggleFullscreen() {
+  const root = document.documentElement;
+  try {
+    if (fsElement()) {
+      if (document.exitFullscreen) await document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      return;
+    }
+    if (!fsAllowed()) return fsAdvice();
+    if (root.requestFullscreen) await root.requestFullscreen({ navigationUI: 'hide' });
+    else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
+    else return fsAdvice();
+  } catch (err) {
+    fsAdvice();
+  }
+}
+
+function syncFullscreen() {
+  const on = !!fsElement();
+  fsBtn.textContent = on ? 'EXIT' : 'FULL';
+  fsBtn.setAttribute('aria-label', on ? 'Leave fullscreen' : 'Enter fullscreen');
+  // the viewport changes size after the transition, so re-measure the scope
+  resize(); if (view.auto) fitView();
+  setTimeout(() => { resize(); if (view.auto) fitView(); }, 120);
+}
+for (const ev of ['fullscreenchange', 'webkitfullscreenchange'])
+  document.addEventListener(ev, syncFullscreen);
+fsBtn.addEventListener('pointerdown', (ev) => { if (ev.pointerType !== 'mouse') ev.preventDefault(); });
+fsBtn.addEventListener('click', toggleFullscreen);
 
 /* ============================================================
    MAIN LOOP
