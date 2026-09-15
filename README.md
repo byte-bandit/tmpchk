@@ -31,6 +31,9 @@ A CDU modelled on the Airbus MCDU, which is what "scratchpad" means in a cockpit
   scratchpad and press a key to load it into that field.
 - **Scratchpad line** carrying typed entry and system messages. A lower-severity
   advisory never wipes a standing caution.
+- **Free multi-line text** where a page needs prose - mission briefings, the
+  message log, the reference pages, uplink latency notes. Rows size to their
+  content and the display scrolls; data pages stay on one line per field.
 - **Twelve function keys** that only ever change page, never vehicle state.
 
 Pages refresh once per second, as a flight management computer does. Every page
@@ -69,3 +72,5 @@ under a headless DOM stub, or drive the page in Chromium):
   reachable, function keys never touch vehicle state, and a plan can be selected,
   reviewed, armed and flown entirely from line-select keys
 - layout and fullscreen suites in a real browser at three screen sizes
+- a text suite asserting nothing is clipped, long paragraphs really wrap, rows
+  never overlap, and data pages stay single-line

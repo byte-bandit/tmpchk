@@ -160,10 +160,22 @@ body{
 .slew:disabled{opacity:.3;cursor:default}
 .slew:active:not(:disabled){background:var(--panel-2);color:var(--amber)}
 
-.cdu-body{display:flex;align-items:stretch;flex:1 1 auto;min-height:172px;gap:3px;padding:3px}
-.lskcol{display:grid;grid-template-rows:repeat(6,1fr);gap:3px;flex:0 0 auto}
+/* Flex rather than grid: a grid's 1fr column is measured at max-content while
+   row heights are computed, so wrapped text reports one line and then overflows
+   its track. Flex resolves the width first, so a wrapped row sizes correctly. */
+.cdu-body{
+  display:flex;flex-direction:column;gap:3px;padding:3px;
+  flex:1 1 auto;min-height:150px;overflow-y:auto;overscroll-behavior:contain;
+  -webkit-overflow-scrolling:touch;
+}
+.rowgrp{display:flex;align-items:stretch;gap:3px;min-width:0}
+.rowgrp > .crow{flex:1 1 auto;min-width:0}
+.rowgrp > .lsk{flex:0 0 22px;align-self:stretch}
+.cdu-body::-webkit-scrollbar{width:3px}
+.cdu-body::-webkit-scrollbar-thumb{background:var(--rule)}
 .lsk{
-  width:22px;background:#0C131C;border:1px solid var(--rule);border-radius:2px;
+  width:22px;min-height:30px;
+  background:#0C131C;border:1px solid var(--rule);border-radius:2px;
   color:#2B3444;font-size:10px;line-height:1;cursor:default;padding:0;
   display:flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent;
 }
@@ -172,12 +184,12 @@ body{
 .lsk.go{color:var(--caution);border-color:#4A3B12;background:#1A1608}
 .lsk.go:active{background:#2A2410}
 
-.crows{display:grid;grid-template-rows:repeat(6,1fr);flex:1 1 auto;min-width:0;gap:0}
 .crow{
-  display:grid;grid-template-columns:1fr 1fr;gap:6px;min-width:0;align-content:center;
-  padding:2px 5px;border-bottom:1px solid #111925;
+  display:grid;grid-template-columns:1fr 1fr;gap:6px;min-width:0;min-height:30px;
+  align-items:center;padding:3px 5px;border-bottom:1px solid #111925;
 }
-.crow:last-child{border-bottom:0}
+.crow.full{grid-template-columns:minmax(0,1fr)}
+.crow.bare{border-bottom:0}
 .fld{min-width:0;display:flex;flex-direction:column;justify-content:center;gap:1px}
 .fld.right{text-align:right}
 .flab{
@@ -188,6 +200,12 @@ body{
   font-size:12.5px;font-weight:500;color:var(--amber);font-variant-numeric:tabular-nums;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2;letter-spacing:-.01em;
 }
+/* free text: wraps over as many display lines as it needs */
+.fval.wrap{
+  white-space:pre-wrap;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;
+  line-height:1.45;letter-spacing:0;font-variant-numeric:normal;
+}
+.fval.body{font-size:12px;color:var(--ink);font-weight:400}
 .fval.sel{color:var(--cyan)}
 .fval.go{color:var(--caution)}
 .fval.ok{color:var(--nominal)}
@@ -299,11 +317,7 @@ button:focus-visible,input:focus-visible{outline:1px solid var(--amber);outline-
           <button class="slew" id="pg-prev" type="button" aria-label="Previous page">‹</button>
           <button class="slew" id="pg-next" type="button" aria-label="Next page">›</button>
         </div>
-        <div class="cdu-body">
-          <div class="lskcol" id="lsk-l"></div>
-          <div class="crows" id="crows"></div>
-          <div class="lskcol" id="lsk-r"></div>
-        </div>
+        <div class="cdu-body" id="cdu-body"></div>
         <form class="entry" id="entry" autocomplete="off">
           <span class="caret">›</span>
           <input id="cmd" name="cmd" type="text" placeholder="" autocomplete="off"
@@ -2190,36 +2204,42 @@ const NAV = (text, page) => F('', text, 'sel', page);
 const takeScratch = () => { const v = input.value.trim(); return v; };
 const eatScratch  = () => { const v = input.value.trim(); input.value = ''; syncScratchpad(); return v; };
 
-/* ---- DOM, built once and only updated thereafter ---- */
-const crowsEl = document.getElementById('crows');
-const lskLEl  = document.getElementById('lsk-l');
-const lskREl  = document.getElementById('lsk-r');
-const ROWS = [], LSK = { l: [], r: [] };
-for (let i = 0; i < 6; i++) {
-  const row = document.createElement('div'); row.className = 'crow';
-  const mk = (side) => {
-    const f = document.createElement('div'); f.className = 'fld' + (side === 'r' ? ' right' : '');
-    const lab = document.createElement('div'); lab.className = 'flab';
-    const val = document.createElement('div'); val.className = 'fval';
-    f.appendChild(lab); f.appendChild(val);
-    f.addEventListener('click', () => fire(i, side));
-    return { f, lab, val };
-  };
-  const L = mk('l'), R = mk('r');
-  row.appendChild(L.f); row.appendChild(R.f);
-  crowsEl.appendChild(row);
-  ROWS.push({ row, L, R });
-  for (const side of ['l', 'r']) {
-    const b = document.createElement('button');
-    b.type = 'button'; b.className = 'lsk';
-    b.textContent = side === 'l' ? '‹' : '›';
-    b.setAttribute('aria-label', `Line select ${i+1}${side.toUpperCase()}`);
-    b.addEventListener('pointerdown', (ev) => { if (ev.pointerType !== 'mouse') ev.preventDefault(); });
-    b.addEventListener('click', () => fire(i, side));
-    (side === 'l' ? lskLEl : lskREl).appendChild(b);
-    LSK[side].push(b);
+/* ---- DOM: row groups are created on demand, so a page may be as long as its
+   content needs. Each group is one grid row spanning key / content / key, so a
+   row that wraps to several lines keeps its line-select keys aligned. ---- */
+const bodyEl = document.getElementById('cdu-body');
+const GROUPS = [];
+function ensureRows(n) {
+  while (GROUPS.length < n) {
+    const i = GROUPS.length;
+    const mkKey = (side) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'lsk';
+      b.textContent = side === 'l' ? '‹' : '›';
+      b.setAttribute('aria-label', `Line select ${i+1}${side.toUpperCase()}`);
+      b.addEventListener('pointerdown', (ev) => { if (ev.pointerType !== 'mouse') ev.preventDefault(); });
+      b.addEventListener('click', () => fire(i, side));
+      return b;
+    };
+    const mkFld = (side) => {
+      const f = document.createElement('div'); f.className = 'fld' + (side === 'r' ? ' right' : '');
+      const lab = document.createElement('div'); lab.className = 'flab';
+      const val = document.createElement('div'); val.className = 'fval';
+      f.appendChild(lab); f.appendChild(val);
+      f.addEventListener('click', () => fire(i, side));
+      return { f, lab, val };
+    };
+    const kl = mkKey('l'), kr = mkKey('r');
+    const row = document.createElement('div'); row.className = 'crow';
+    const L = mkFld('l'), R = mkFld('r');
+    row.appendChild(L.f); row.appendChild(R.f);
+    const grp = document.createElement('div'); grp.className = 'rowgrp';
+    grp.appendChild(kl); grp.appendChild(row); grp.appendChild(kr);
+    bodyEl.appendChild(grp);
+    GROUPS.push({ grp, kl, kr, row, L, R });
   }
 }
+ensureRows(6);
 
 let CURRENT = [];                       // rows as last rendered, for hit-testing
 function fire(i, side) {
@@ -2255,21 +2275,25 @@ function renderCDU() {
   document.getElementById('pg-next').disabled = count < 2;
 
   CURRENT = rows;
-  for (let i = 0; i < 6; i++) {
-    const r = rows[i], node = ROWS[i];
-    node.row.classList.toggle('full', !!(r && r.full));
-    const put = (cell, fld) => {
+  const n = Math.max(6, rows.length);
+  ensureRows(n);
+  for (let i = 0; i < GROUPS.length; i++) {
+    const r = rows[i], g = GROUPS[i];
+    const used = i < n;
+    g.grp.style.display = used ? '' : 'none';
+    if (!used) continue;
+    const isFull = !!(r && r.full);
+    g.row.classList.toggle('full', isFull);
+    g.row.classList.toggle('bare', !r || (!r.l && !r.r && !r.full));
+    const put = (cell, fld, wrap) => {
       cell.lab.textContent = fld ? fld.lab : '';
       cell.val.textContent = fld ? fld.val : '';
-      cell.val.className = 'fval ' + (fld ? fld.cls : '');
+      cell.val.className = 'fval ' + (fld ? fld.cls : '') + (wrap ? ' wrap' : '');
       cell.f.classList.toggle('tap', !!(fld && fld.act));
       cell.f.style.display = '';
     };
-    if (r && r.full) {
-      put(node.L, r.full); put(node.R, null); node.R.f.style.display = 'none';
-    } else {
-      put(node.L, r ? r.l : null); put(node.R, r ? r.r : null);
-    }
+    if (isFull) { put(g.L, r.full, !!r.wrap); g.R.f.style.display = 'none'; }
+    else { put(g.L, r ? r.l : null, !!r && !!r.wrap); put(g.R, r ? r.r : null, !!r && !!r.wrap); }
     const mark = (btn, fld, side) => {
       const on = !!(fld && fld.act);
       const go = on && /\*$/.test(fld.val);
@@ -2277,8 +2301,8 @@ function renderCDU() {
       btn.textContent = on ? (side === 'l' ? '‹' : '›') : '·';
       btn.disabled = !on;
     };
-    mark(LSK.l[i], r ? (r.full ? r.full : r.l) : null, 'l');
-    mark(LSK.r[i], r && !r.full ? r.r : null, 'r');
+    mark(g.kl, r ? (r.full ? r.full : r.l) : null, 'l');
+    mark(g.kr, r && !r.full ? r.r : null, 'r');
   }
   markPageKey();
 }
@@ -2393,7 +2417,7 @@ PLANR: Object.assign(one('SOLUTION'), {
         r: F('Ignition at', s0.nodeLabel || '—') },
       { l: F('Time to ignition', isFinite(tt) ? fmtT(tt) : '——', 'go'),
         r: F('ΔV remaining', dv(), 'ok') },
-      { full: F('Predicted', s0.detail || '', 'ok') },
+      { full: F('Predicted', s0.detail || '—', 'ok'), wrap: true },
       { l: F('Prop required', s0.prop != null ? s0.prop.toFixed(1) + ' kg' : '—'),
         r: F('Prop aboard', S.craft.fuel.toFixed(1) + ' kg') },
       { l: NAV('<PLAN', 'PLAN'),
@@ -2472,7 +2496,9 @@ DOCK: Object.assign(one('PROXIMITY OPS'), {
         r: F('0.05 m/s', 'STBD>', 'sel', pulse('STBD', 0.05)) },
       { l: F('', '<NULL RELATIVE*', 'go', () => exec('TRANS NULL')),
         r: F('RCS ΔV', fmtDV(rcsDV())) },
-      { l: NAV('<MENU', 'MENU'), r: F('Gate', '20 m · 0.30 m/s', 'dim') },
+      { full: F('Approach profile',
+          'Hold closing rate near range in metres divided by 100. Capture gate is 20 m at under 0.30 m/s closing and 0.10 m/s lateral. NULL RELATIVE cancels all relative motion in one pulse — expensive, but it recovers a bad approach.', 'body'), wrap: true },
+      { l: NAV('<MENU', 'MENU'), r: NAV('TARGET>', 'TGT') },
     ];
   } }),
 
@@ -2517,8 +2543,9 @@ THRM: Object.assign(one('THERMAL'), { sub: () => D.ecl ? 'ECLIPSE' : 'SUNLIT', b
       r: F('Structural limit', tl + ' °C') },
     { l: F('Solar flux', D.flux.toFixed(0) + ' W/m²'), r: F('Relative to Earth', (D.flux/1361).toFixed(2) + '×') },
     { l: F('Solar distance', (D.dSun/AU).toFixed(4) + ' AU'), r: F('Illumination', D.ecl ? 'ECLIPSE' : 'SUNLIT') },
-    { full: h > tl*0.55 ? F('', 'RAISE PERIAPSIS — HEAT RISES WITH INVERSE SQUARE', 'go') : F('', '', 'dim') },
-    {},
+    h > tl*0.55
+      ? { full: F('Caution', `Hull at ${h.toFixed(0)} °C against a ${tl} °C limit. Heat load rises with the inverse square of solar distance, so raising perihelion is the only real remedy.`, 'go'), wrap: true }
+      : {},
     menuRow('POWER>', 'PWR'),
   ]; } }),
 
@@ -2533,7 +2560,9 @@ COMM: Object.assign(one('COMMUNICATIONS'), { sub: () => S.loads.COMM ? 'TX ON' :
     { l: F('Data rate', S.loads.COMM ? Math.max(0.1, Math.min(2048, sig*40)).toFixed(1) + ' kbps' : '—'),
       r: F('Transmitter', S.loads.COMM ? 'ON' : 'OFF', S.loads.COMM ? 'sel' : 'dim',
            () => exec(`PWR COMM ${S.loads.COMM ? 'OFF' : 'ON'}`)) },
-    {}, {},
+    D.lightTime > 1
+      ? { full: F('Uplink latency', `A command sent now reaches the vehicle ${fmtT(D.lightTime)} later, and any reply takes the same again. Real crews plan around this; the console still responds at once.`, 'body'), wrap: true }
+      : { full: F('Uplink latency', 'Negligible at this range.', 'body'), wrap: true },
     menuRow('POWER>', 'PWR'),
   ]; } }),
 
@@ -2555,24 +2584,23 @@ MSN: {
   title: () => 'MISSION',
   sub: () => S.mission ? S.mission.code : 'NONE',
   build: (pg) => {
-    if (!S.mission) return [{ full: F('', 'NO MISSION LOADED', 'dim') }, {}, {}, {},
-                            { l: NAV('<ROSTER', 'ROSTER') }, menuRow()];
+    if (!S.mission) return [{ full: F('', 'NO MISSION LOADED', 'dim') },
+                            { l: NAV('<ROSTER', 'ROSTER'), r: NAV('MENU>', 'MENU') }];
     if (pg === 1) {
-      const lines = (S.mission.brief.join(' ').replace(/[{}]/g, '').match(/.{1,44}(\s|$)/g) || []);
-      const rows = lines.slice(0, 5).map(t => ({ full: F('', t.trim(), 'dim') }));
-      while (rows.length < 5) rows.push({});
-      rows.push({ l: NAV('<OBJECTIVES', 'MSN'), r: F('Procedure', S.mission.hint || '', 'ok') });
+      // the briefing: free text, as many lines as it takes
+      const rows = S.mission.brief.map(t => ({ full: F('', t.replace(/[{}]/g, ''), 'body'), wrap: true }));
+      rows.push({ full: F('Procedure', S.mission.hint || '—', 'ok'), wrap: true });
+      rows.push({ l: NAV('<OBJECTIVES', 'MSN'), r: NAV('ROSTER>', 'ROSTER') });
       return rows;
     }
-    const o = S.objectives;
-    return [
-      { full: F('Mission', S.mission.name, 'ok') },
-      o[0] ? { full: F(o[0].done ? 'MET' : 'OPEN', (o[0].done ? '✔ ' : '○ ') + o[0].text, o[0].done ? 'ok' : '') } : {},
-      o[1] ? { full: F(o[1].done ? 'MET' : 'OPEN', (o[1].done ? '✔ ' : '○ ') + o[1].text, o[1].done ? 'ok' : '') } : {},
-      o[2] ? { full: F(o[2].done ? 'MET' : 'OPEN', (o[2].done ? '✔ ' : '○ ') + o[2].text, o[2].done ? 'ok' : '') } : {},
-      { l: F('Elapsed', fmtMET(S.t)), r: F('ΔV expended', fmtDV(S.ledger.dvUsed)) },
-      { l: NAV('<ROSTER', 'ROSTER'), r: F('', 'RESTART*', 'go', () => exec('RESTART')) },
-    ];
+    const rows = [{ full: F('Mission', S.mission.name, 'ok') }];
+    S.objectives.forEach((o, i) => rows.push({
+      full: F(`Objective ${i+1} · ${o.done ? 'MET' : 'OPEN'}`,
+              (o.done ? '✔ ' : '○ ') + o.text, o.done ? 'ok' : ''), wrap: true }));
+    rows.push({ l: F('Elapsed', fmtMET(S.t)), r: F('ΔV expended', fmtDV(S.ledger.dvUsed)) });
+    rows.push({ full: F('Procedure', S.mission.hint || '—', 'ok'), wrap: true });
+    rows.push({ l: NAV('<ROSTER', 'ROSTER'), r: F('', 'RESTART*', 'go', () => exec('RESTART')) });
+    return rows;
   } },
 
 ROSTER: { count: () => Math.ceil(MISSIONS.length / 5), title: () => 'MISSION ROSTER',
@@ -2582,19 +2610,17 @@ ROSTER: { count: () => Math.ceil(MISSIONS.length / 5), title: () => 'MISSION ROS
     const rows = slice.map(m => ({ full: F(done.includes(m.id) ? 'FLOWN' : '',
       `<${m.code}  ${m.name}`, S.mission && S.mission.id === m.id ? 'ok' : 'sel',
       () => { loadMission(m.id); gotoPage('MSN'); }) }));
-    while (rows.length < 5) rows.push({});
     rows.push({ l: NAV('<MISSION', 'MSN'), r: NAV('MENU>', 'MENU') });
     return rows;
   } },
 
-MSG: { count: () => Math.max(1, Math.ceil(MSGS.length / 5)), title: () => 'MESSAGES',
+MSG: { count: () => Math.max(1, Math.ceil(MSGS.length / 6)), title: () => 'MESSAGES',
   sub: () => MSGS.length + ' LOGGED', build: (pg) => {
-    const rev = MSGS.slice().reverse();
-    const slice = rev.slice(pg*5, pg*5 + 5);
-    const rows = slice.map(m => ({ full: F(fmtMET(m.t).slice(4),
-      m.text.length > 46 ? m.text.slice(0, 45) + '…' : m.text,
-      m.cls === 'err' ? 'bad' : m.cls === 'warn' ? 'go' : m.cls === 'ok' ? 'ok' : m.cls === 'dim' ? 'dim' : '') }));
-    while (rows.length < 5) rows.push({});
+    const rev = MSGS.slice().reverse().filter(m => m.text.trim());
+    const slice = rev.slice(pg*6, pg*6 + 6);
+    const rows = slice.map(m => ({ full: F(fmtMET(m.t).slice(4), m.text,
+      m.cls === 'err' ? 'bad' : m.cls === 'warn' ? 'go' : m.cls === 'ok' ? 'ok' : 'body'), wrap: true }));
+    if (!rows.length) rows.push({ full: F('', 'NO MESSAGES', 'dim') });
     rows.push({ l: NAV('<MENU', 'MENU'), r: F('', 'CLEAR ALL*', 'go', () => { MSGS.length = 0; clearMessage(); }) });
     return rows;
   } },
@@ -2616,8 +2642,7 @@ MENU: { count: () => 2, title: () => 'INDEX', sub: () => '', build: (pg) => pg =
 
 HELP: { count: () => HELP_PAGES.length, title: () => 'REFERENCE', sub: () => HELP_PAGES[CDU.sub].t,
   build: (pg) => {
-    const rows = HELP_PAGES[pg].rows.map(r => ({ full: F(r[0], r[1], r[2] || '') }));
-    while (rows.length < 5) rows.push({});
+    const rows = HELP_PAGES[pg].rows.map(r => ({ full: F(r[0], r[1], r[2] || 'body'), wrap: true }));
     rows.push({ l: NAV('<MENU', 'MENU'), r: NAV('ORBIT>', 'ORB') });
     return rows;
   } },
