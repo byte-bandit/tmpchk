@@ -63,14 +63,19 @@ solar dive with a thermal limit. Plus free flight.
 
 `index.html` is the whole game — no build step, no dependencies.
 
-Test suites live outside the repo (they extract the script blocks and run them
-under a headless DOM stub, or drive the page in Chromium):
+    ./tests/run.sh          # every suite
 
-- physics and mission-balance checks
-- two end-to-end suites that fly every mission to completion
-- a CDU suite: every page builds cleanly in every mission state, every page is
-  reachable, function keys never touch vehicle state, and a plan can be selected,
-  reviewed, armed and flown entirely from line-select keys
-- layout and fullscreen suites in a real browser at three screen sizes
-- a text suite asserting nothing is clipped, long paragraphs really wrap, rows
-  never overlap, and data pages stay single-line
+Tests boot the real page: `tests/harness.js` extracts its script blocks and runs
+them under a headless DOM stub, and `tests/browser/` drives it in Chromium.
+
+| Suite | Covers |
+|---|---|
+| `physics.test.js` | Propagator exactness, apsides, hyperbolic arcs, and that every mission is solvable with the propellant it carries |
+| `missions.test.js` | M-01, M-02, M-07, M-09 flown to completion; planner guards; command surface |
+| `deep.test.js` | Lunar flyby, lunar orbit, landing, Mars capture, rendezvous and docking |
+| `cdu.test.js` | Every page builds in every mission state, every page reachable, function keys never touch vehicle state, plan → arm → fly from line-select keys |
+| `browser/layout.test.js` | Three screen sizes, key counts, no overflow |
+| `browser/text.test.js` | Nothing clipped, paragraphs wrap, rows never overlap |
+| `browser/fullscreen.test.js` | Top level, permitted frame, denied frame |
+
+Planned work is in [`docs/backlog/`](docs/backlog/).
