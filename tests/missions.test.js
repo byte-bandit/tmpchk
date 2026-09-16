@@ -108,6 +108,10 @@ console.log('\nPLANNER GUARDS');
 /* ---------- command surface smoke test ---------- */
 console.log('\nCOMMAND SURFACE');
 loadMission(0);
+// Free flight boots dark; wake it so the surface below is exercised against a
+// live vehicle rather than ten refusals. The dark surface has its own suite.
+exec('PWR UP');
+for (let i = 0; i < 900 && S.pwrUp; i++) advance(1);
 const before = out().length;
 for (const c of ['HELP','HELP ORBIT','HELP BURN','HELP DOCK','STAT','NAV','PWR','FUEL','COMM','THERM','LIFE',
                  'MIS','LOG','TIME','PLAN','PLAN CIRC AP','PLAN CIRC PE','PLAN APO 5000','PLAN PERI 300',

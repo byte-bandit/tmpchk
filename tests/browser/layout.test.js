@@ -81,6 +81,38 @@ const { suite } = require('../harness');
     ok('all four UTILITIES sub-pages fit', utilBad.length===0, utilBad.join(' | ') || 'vestibule/electrical/eclss/propellant');
     ok('still 12 function keys — UTIL is a link, not a 13th', g.pkCount===12);
 
+    // A cold, dark vehicle and the systems page it opens on. Free flight boots
+    // dark, so this is the first thing a player ever sees at this width.
+    await p.fill('#cmd','MIS 0'); await p.press('#cmd','Enter'); await p.waitForTimeout(250);
+    const dark = await p.evaluate(()=>({
+      sub: document.getElementById('cdu-sub').textContent,
+      live: [...document.querySelectorAll('.lsk')].filter(b=>!b.disabled).length,
+      text: document.getElementById('cdu-body').textContent,
+      scrollX: document.documentElement.scrollWidth > window.innerWidth+1,
+      clip: [...document.querySelectorAll('.fval')]
+        .filter(e=>e.textContent.trim() && e.scrollWidth > e.clientWidth + 1).map(e=>e.textContent.slice(0,30)) }));
+    ok('a dark console fits and says what it is', !dark.scrollX && /UNPOWERED/.test(dark.sub)
+       && /BATTERY TIE/.test(dark.text), dark.sub);
+    ok('and offers exactly one lit key to get out of it', dark.live===1, dark.live+' live keys');
+    ok('nothing clipped on the dark screen', dark.clip.length===0, dark.clip.join(' | '));
+    // wake it, then walk both systems pages
+    await p.evaluate(()=>{ const f=[...document.querySelectorAll('.fld')].find(e=>/BATTERY TIE/.test(e.textContent)); if(f) f.click(); });
+    await p.waitForTimeout(250);
+    let sysBad = [];
+    for (let i=0;i<2;i++) {
+      const s = await p.evaluate(()=>({ title: document.getElementById('cdu-t').textContent,
+        sub: document.getElementById('cdu-sub').textContent,
+        rows: [...document.querySelectorAll('.rowgrp')].filter(gr=>gr.style.display!=='none').length,
+        scrollX: document.documentElement.scrollWidth > window.innerWidth+1,
+        clip: [...document.querySelectorAll('.fval')]
+          .filter(e=>e.textContent.trim() && e.scrollWidth > e.clientWidth + 1).map(e=>e.textContent.slice(0,30)) }));
+      if (!/SYSTEMS/.test(s.title) || s.scrollX || s.clip.length) sysBad.push((s.sub||s.title)+':'+(s.clip.join(',')||'scroll'));
+      await p.__press('#pg-next'); await p.waitForTimeout(180);
+    }
+    ok('both SYSTEMS pages fit, with the bus load in the title', sysBad.length===0,
+       sysBad.join(' | ') || 'two pages of five systems');
+    ok('still 12 function keys — SYS is a link too', g.pkCount===12);
+
     ok('no page errors', errs.length===0, errs.join('|'));
     await ctx.close();
   }

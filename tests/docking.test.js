@@ -165,11 +165,18 @@ ok('the leak check closes the equalisation valve', !S.dock.vest.valve);
 advance(20); exec('DOCK EQUALISE');
 ok('reopening the valve aborts the leak check', S.dock.vest.check < 0 && /ABORTED/.test(tail(1)), tail(1).slice(0, 60));
 
+/** Put the vestibule back up to cabin pressure, whatever state the valve is in.
+ *  DOCK EQUALISE is a toggle, so firing it blind closed the valve about one run
+ *  in six: a randomly bad seal on the first capture bleeds the vestibule below
+ *  101.2 kPa during the twenty-second hold above, and the next step then waited
+ *  for a pressure that was falling away from it. */
+function reEqualise() { if (!S.dock.vest.valve) exec('DOCK EQUALISE'); }
+
 /* ---- 6b. the leak check has a verdict worth waiting for ---- */
 // The seal is rolled when the latches close, so the tests set it directly:
 // the roll itself is checked statistically further down.
 S.dock.vest.leak = 0.62;                                  // kPa/min — a seal that did not seat
-exec('DOCK EQUALISE'); until(() => S.dock.vest.press >= 101.2);
+reEqualise(); until(() => S.dock.vest.press >= 101.2);
 exec('DOCK LEAK');
 advance(8);
 const early = S.dock.vest.decay * 60 / S.dock.vest.check;
@@ -183,7 +190,7 @@ ok('the vestibule really lost that pressure', S.dock.vest.press < 101.3 - LEAK_L
 exec('DOCK HATCH');
 ok('a failed check still keeps the hatch shut', !S.dock.vest.hatch, tail(1).slice(0, 45));
 // re-running the check on the same seal must fail again — the seal is the problem
-exec('DOCK EQUALISE'); until(() => S.dock.vest.press >= 101.2); exec('DOCK LEAK');
+reEqualise(); until(() => S.dock.vest.press >= 101.2); exec('DOCK LEAK');
 until(() => S.dock.vest.verdict);
 ok('re-running the check on the same seal fails again', S.dock.vest.verdict === 'FAIL');
 // re-seating is the fix, and it costs a vented vestibule and a second latch drive
@@ -197,7 +204,7 @@ ok('and the interface seats again', S.dock.phase === 'HARD' && S.dock.latches ==
    `${((S.t - reseatAt)).toFixed(0)} s to re-seat`);
 ok('with a freshly rolled seal', S.dock.vest.leak !== 0.62, S.dock.vest.leak.toFixed(3) + ' kPa/min');
 S.dock.vest.leak = 0.04;                                  // a good one this time
-exec('DOCK EQUALISE'); until(() => S.dock.vest.press >= 101.2); exec('DOCK LEAK');
+reEqualise(); until(() => S.dock.vest.press >= 101.2); exec('DOCK LEAK');
 until(() => S.dock.vest.verdict);
 ok('a good seal passes, with its margin stated', S.dock.vest.verdict === 'PASS' && S.dock.vest.leakOk,
    tail(1).slice(0, 62));
@@ -302,7 +309,13 @@ const autoFld = G.CURRENT.map(r => [r.l, r.r].map(f => f ? f.lab + ' ' + f.val :
 ok('and the page says the same thing the command does', /Auto dock NOT FITTED/.test(autoFld),
    (autoFld.match(/Auto dock [A-Z ]+/) || ['none'])[0]);
 
-loadMission(0); exec('WARP 1'); exec('TGT STATION');
+// Free flight starts cold and dark now, so the sandbox has to be woken up
+// before it can fly anything. PWR UP runs the real sequence at real speed.
+loadMission(0); exec('PWR UP');
+for (let i = 0; i < 900 && S.pwrUp; i++) advance(1);
+ok('free flight wakes from a cold start', G.SYSIDS.every(id => !G.sysFitted(id) || G.sysOn(id)),
+   'powered up in ' + (S.t / 60).toFixed(1) + ' min');
+exec('WARP 1'); exec('TGT STATION');
 ok('free flight has a station to dock with', !!dockTarget());
 place({ axial: -40, lateral: 30, closing: 0 });
 exec('DOCK AUTO');

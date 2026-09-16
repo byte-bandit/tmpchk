@@ -65,6 +65,8 @@ function boot(file = GAME) {
   inProxOps, fmtRange, fmtRate, commandedTheta, attError, makeStation,
   PORT_ARM, PORT_ARM_STN, dockLeg, stepDock, DOCK_HOLD, DOCK_STAND,
   LEAK_LIMIT, LEAK_HOLD, rollSeal,
+  SYSTEMS, SYSDEF, SYSIDS, sysOn, sysState, sysBlocker, sysStart, sysStop, sysBoot,
+  sysFitted, stepSys, tripBus, alignLeft, ALIGN_TIME, ALIGN_DRIFT, ALIGN_OK, darkRows,
   get S(){ return S; }, get D(){ return D; },
   get CURRENT(){ return CURRENT; }, get spMessage(){ return spMessage; },
 };`);

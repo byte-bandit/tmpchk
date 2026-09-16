@@ -543,6 +543,9 @@ const S = {
   // `mode` is what the autopilot is chasing; `theta` is where the nose is.
   att: { theta: 0, rate: 0, mode: 'PRO', inertial: 0, slewing: false },
   dock: freshDock(),
+  // Which systems are running. A mission declares its own starting set; a
+  // warm one simply starts with all of them ON. See SYSTEMS below.
+  sys: {}, pwrUp: false, aligning: false,
 };
 
 /* ---- docking state ----------------------------------------------------
@@ -561,6 +564,196 @@ function freshDock() {
     air:  { duct:false, fan:false },
     prop: { line:false, purge:0, purged:false, xfer:false, moved:0, done:false },
   };
+}
+
+/* ---- systems: the cold-start dependency graph --------------------------
+   Every mission used to boot with everything already running. Now each system
+   has prerequisites, a warm-up and a power draw, and a mission declares which
+   of them it starts with. A warm mission is one that starts with all of them
+   ON — the two ends of one mechanism, so there is exactly one code path and a
+   warm vehicle is just a cold start that is already finished.
+
+   Per system: OFF → START (counting its warm-up) → ON, or FAULT if its supply
+   is pulled out from under it. `draw` is watts on the bus once ON.
+
+   The draws below ITEMISE the old model; they do not add to it. The bus load
+   of a warm vehicle used to be a flat 120 W "avionics floor" plus 140 W of
+   heaters and 80 W of transmitter, and it still is: the five systems that draw
+   anything sum to exactly that 120 W on a crewed vehicle, and to 95 W on one
+   with no life support to run. A warm mission's power margin therefore does
+   not move by a single watt.
+
+   That constraint is not fussiness. The first version of this gave every new
+   system a realistic-looking draw, which took a warm crewed vehicle from 340 W
+   to 555 W — and M-05 promptly died on the way to the Moon. Its translunar
+   coast passes through three and a half hours of Earth's shadow, which 1800 Wh
+   survives at 340 W and does not at 555 W. The wattages are a split of a fixed
+   budget, and anything that wants to raise the total has to be measured
+   against every mission's longest eclipse first.                            */
+const BUS_FLOOR   = 0.02;     // fraction of the pack the main bus may not draw below
+const ALIGN_TIME  = 180;      // s   — a full guidance platform alignment
+const ALIGN_DRIFT = 12.0;     // °/h — residual platform drift at the start of one
+const ALIGN_OK    = 0.05;     // °/h — aligned
+const SYSTEMS = [
+  { id:'BATT',  name:'BATTERY',           tag:'BATT', needs:[],       warm:0,          draw:0,
+    note:'Mechanical tie. Needs nothing, and nothing works without it.' },
+  { id:'BUS',   name:'MAIN BUS',          tag:'BUS',  needs:['BATT'], warm:8,          draw:10,
+    note:'Distribution contactors. Everything else hangs off this.' },
+  { id:'AVIO',  name:'AVIONICS',          tag:'AVIO', needs:['BUS'],  warm:45,         draw:45,
+    note:'Flight computer and navigation. No avionics, no numbers.' },
+  { id:'ARRAY', name:'SOLAR ARRAY',       tag:'ARRY', needs:['BUS'],  warm:75,         draw:0, run:60,
+    note:'Deployment motors. Stowed arrays generate nothing, sunlit or not.' },
+  { id:'THERM', name:'THERMAL LOOP',      tag:'THRM', needs:['BUS'],  warm:25,         draw:0,
+    note:'Coolant pumps and heaters.' },
+  { id:'ECLSS', name:'LIFE SUPPORT',      tag:'ECLS', needs:['BUS'],  warm:40,         draw:25, crew:true,
+    note:'Cabin loop and CO₂ scrubbers. Off, the crew are on emergency oxygen.' },
+  { id:'ATT',   name:'ATTITUDE CONTROL',  tag:'ATT',  needs:['AVIO'], warm:20,         draw:0,
+    note:'Reaction wheels. Draws only while the vehicle is turning.' },
+  { id:'GNC',   name:'GUIDANCE PLATFORM', tag:'GNC',  needs:['ATT'],  warm:ALIGN_TIME, draw:30,
+    note:'Inertial platform. Aligns only while the vehicle is held steady.' },
+  { id:'PRESS', name:'PROPULSION',        tag:'PRSS', needs:['AVIO'], warm:50,         draw:10,
+    note:'Tank pressurisation. Unpressurised, neither the engine nor RCS fires.' },
+  { id:'COMM',  name:'TRANSMITTER',       tag:'COMM', needs:['AVIO'], warm:30,         draw:0,
+    note:'S-band transmitter and its amplifier.' },
+];
+const SYSDEF = {};
+for (const d of SYSTEMS) SYSDEF[d.id] = d;
+const SYSIDS = SYSTEMS.map(d => d.id);
+
+/** Is this system fitted to this vehicle at all? (No crew, no life support.) */
+const sysFitted = (id) => !(SYSDEF[id].crew && !S.craft.crew);
+/** Running and usable. Anything that asks "can I do this yet" asks this. */
+const sysOn = (id) => !!(S.sys[id] && S.sys[id].state === 'ON');
+const sysState = (id) => (S.sys[id] && S.sys[id].state) || 'OFF';
+const sysStarting = () => SYSIDS.some(id => sysState(id) === 'START');
+/** The first unmet prerequisite of a system, or null. */
+function sysBlocker(id) {
+  for (const n of SYSDEF[id].needs) if (!sysOn(n)) return n;
+  return null;
+}
+
+/** Put every system into a named state. `on` is the list that starts running;
+ *  omitted means all of them, which is how every warm mission boots. */
+function sysBoot(on) {
+  const all = on === undefined;
+  const set = new Set(all ? SYSIDS : on);
+  S.sys = {}; S.pwrUp = false; S.aligning = false;
+  for (const d of SYSTEMS) {
+    const live = sysFitted(d.id) && set.has(d.id);
+    S.sys[d.id] = { state: live ? 'ON' : 'OFF', t: live ? d.warm : 0,
+                    drift: live ? 0 : ALIGN_DRIFT };
+  }
+}
+
+/** Begin a start-up. Returns a refusal string, or null if it took. */
+function sysStart(id) {
+  const d = SYSDEF[id];
+  if (!d) return `No system "${id}".`;
+  if (!sysFitted(id)) return `${d.name} is not fitted to this vehicle.`;
+  const s = S.sys[id];
+  if (s.state === 'ON') return `${d.name} is already running.`;
+  if (s.state === 'START') return `${d.name} is already starting.`;
+  const block = sysBlocker(id);
+  if (block) return `${d.name} needs ${SYSDEF[block].name} first — it has no supply until that is running.`;
+  s.state = d.warm > 0 ? 'START' : 'ON'; s.t = 0;
+  if (id === 'GNC') { s.drift = ALIGN_DRIFT; s.disturbed = false; S.aligning = true; }
+  return null;
+}
+
+/** Shut a system down, and everything standing on it. */
+function sysStop(id, why) {
+  const s = S.sys[id];
+  if (!s || s.state === 'OFF') return;
+  s.state = 'OFF'; s.t = 0;
+  if (id === 'GNC') { s.drift = ALIGN_DRIFT; S.aligning = false; }
+  for (const d of SYSTEMS) if (d.needs.includes(id) && sysState(d.id) !== 'OFF') sysStop(d.id, why);
+}
+
+/** The bus collapses. Everything downstream of the battery drops, and the
+ *  guidance platform loses its alignment with it — which is the real cost of
+ *  switching on more than the battery can carry. */
+function tripBus() {
+  if (sysState('BUS') === 'OFF') return;
+  const lost = sysOn('GNC');
+  for (const id of SYSIDS) if (id !== 'BATT') sysStop(id);
+  S.pwrUp = false;
+  // Shedding the bus hands back the protected reserve — the part of the pack
+  // the main bus was never allowed to spend. It is what a separate essential
+  // battery would be, and it is the reason a collapse is expensive rather than
+  // terminal: a vehicle that flattened itself with the arrays still stowed can
+  // always close the bus again and get them out. Twenty-five watts of bus and
+  // sixty of deployment motors run for a quarter of an hour on it; deployment
+  // takes seventy-five seconds.
+  S.power.batt = Math.max(S.power.batt, S.power.battMax * BUS_FLOOR);
+  say('BUS TRIP · battery collapsed under the load. Every system downstream of the battery has dropped'
+      + (lost ? ', and the guidance platform has lost its alignment.' : '.')
+      + ' Shed what you do not need, get the arrays into sunlight, and bring it back up.', 'err');
+}
+
+/** Warm-ups, alignment and the auto power-up sequence.
+ *
+ *  Every one of these is a countdown, not a controller, so it settles exactly
+ *  inside whatever chunk advance() hands it — there is nothing here to diverge
+ *  at the Kepler chunk scale. advance() still bounds the chunk while anything
+ *  is starting, so a warm-up is not charged a hundred seconds of draw for a
+ *  forty-five second start. Warm missions have nothing starting, so that bound
+ *  never applies to them. */
+function stepSys(dt) {
+  for (const d of SYSTEMS) {
+    const s = S.sys[d.id];
+    if (!s || s.state !== 'START') continue;
+    const block = sysBlocker(d.id);
+    if (block) { sysStop(d.id); say(`${d.name} DROPPED · ${SYSDEF[block].name} is no longer running.`, 'warn'); continue; }
+    if (d.id === 'GNC') {
+      // A platform aligns against a steady vehicle. Turn while it is working
+      // and you push it back — the drift climbs and you watch it climb.
+      if (S.att.slewing) {
+        s.t = Math.max(0, s.t - dt * 3);
+        if (!s.disturbed) { s.disturbed = true;
+          say('PLATFORM DISTURBED · the vehicle is turning under the alignment. Watch the drift climb — hold the attitude steady and it will settle again.', 'warn'); }
+      } else { s.t += dt; s.disturbed = false; }
+      s.drift = ALIGN_DRIFT * Math.exp(-5.5 * s.t / d.warm);
+      if (s.t >= d.warm) {
+        s.t = d.warm; s.drift = 0; s.state = 'ON'; S.aligning = false;
+        say(`GUIDANCE PLATFORM ALIGNED · residual drift under ${ALIGN_OK.toFixed(2)} °/h. Attitude hold and the engine are available.`, 'ok');
+      }
+      continue;
+    }
+    s.t += dt;
+    if (s.t >= d.warm) { s.t = d.warm; s.state = 'ON'; say(`${d.name} ON LINE.`, 'ok'); }
+  }
+  // Auto sequence: start whatever is legal next. It takes the full time — this
+  // is a convenience for a second flight, not a way to skip the first one.
+  if (S.pwrUp) {
+    let left = false;
+    for (const d of SYSTEMS) {
+      if (!sysFitted(d.id)) continue;
+      const st = sysState(d.id);
+      if (st === 'ON') continue;
+      left = true;
+      if (st === 'OFF' && !sysBlocker(d.id)) sysStart(d.id);
+    }
+    if (!left) { S.pwrUp = false; say('POWER-UP SEQUENCE COMPLETE · all systems on line.', 'ok'); }
+  }
+}
+
+/** Push an alignment in progress back by `secs` of settling. Thruster firings
+ *  and slews both do it; the drift on the page climbs and you watch it climb. */
+function disturbAlign(secs, why) {
+  const s = S.sys.GNC;
+  if (!s || s.state !== 'START' || !(secs > 0)) return;
+  s.t = Math.max(0, s.t - secs);
+  s.drift = ALIGN_DRIFT * Math.exp(-5.5 * s.t / ALIGN_TIME);
+  say(`PLATFORM DISTURBED · ${why} with the alignment running. Residual drift back up to ${s.drift.toFixed(2)} °/h, ${fmtT(ALIGN_TIME - s.t)} to go.`, 'warn');
+}
+
+sysBoot();     // nothing is loaded yet; a warm vehicle is the resting state
+
+/** Seconds of alignment left, or 0. Projected the way the leak check is. */
+function alignLeft() {
+  const s = S.sys.GNC;
+  if (!s || s.state !== 'START') return 0;
+  return Math.max(0, ALIGN_TIME - s.t);
 }
 
 const craftMass = () => S.craft.dry + S.craft.fuel + S.craft.rcs;
@@ -589,15 +782,26 @@ function derive() {
     const perp  = Math.abs(V.crs(S.r, toSun));
     ecl = along < 0 && perp < b.R;
   }
-  const gen = ecl ? 0 : flux * S.power.area * S.power.eff;
+  // Stowed arrays generate nothing, sunlit or not — deployment is a step in
+  // the power-up, not scenery.
+  const gen = (ecl || !sysOn('ARRAY')) ? 0 : flux * S.power.area * S.power.eff;
   // Tied to the station, its bus carries the vehicle and the battery stops
   // working. This is the visible payoff of the power hookup.
   const tie = S.dock.pwr.tie ? (S.craft.stationSupply || 2000) : 0;
   S.power.tie = tie;
-  let load = 120;                                          // avionics floor
-  if (S.loads.HEAT) load += 140;
-  if (S.loads.COMM) load += 80;
-  if (S.loads.SCI)  load += 210;
+  // The bus load is now whatever is actually running. The three switched loads
+  // that existed before keep their exact draws and hang off their equipment:
+  // a warm vehicle still carries 120 W of avionics, 140 W of heaters and 80 W
+  // of transmitter, plus the systems this item added.
+  let load = 0;
+  for (const d of SYSTEMS) {
+    const st = sysState(d.id);
+    if (st === 'ON') load += d.draw;
+    else if (st === 'START') load += (d.run != null ? d.run : d.draw);
+  }
+  if (sysOn('THERM') && S.loads.HEAT) load += 140;
+  if (sysOn('COMM')  && S.loads.COMM) load += 80;
+  if (sysOn('BUS')   && S.loads.SCI)  load += 210;
   if (S.burn) load += 60;
   if (S.att.slewing) load += S.craft.slewPower || 90;   // reaction wheels
   S.power.gen = gen; S.power.load = load;
@@ -619,9 +823,24 @@ function derive() {
 function stepSystems(dt) {
   const net = (S.power.gen + S.power.tie - S.power.load) * dt / 3600;   // Wh
   S.power.batt = Math.max(0, Math.min(S.power.battMax, S.power.batt + net));
+  // Draw more than the battery can carry and the bus lets go. This is the one
+  // genuine failure in the power-up; everything else simply refuses.
+  //
+  // The main bus cannot draw the pack below a protected reserve — which is why
+  // a collapse is expensive rather than terminal. Without it a vehicle that
+  // flattened its battery with the arrays still stowed could never deploy
+  // them, and "nothing is unrecoverable" would stop being true.
+  if (S.power.batt <= 0 && net < 0) tripBus();
+  stepSys(dt);
   // Breathing is only free once the station's air is ducted through the hatch.
-  if (S.craft.crew && !S.dock.air.fan)
-    S.craft.o2 = Math.max(0, S.craft.o2 - S.craft.crew * dt / 3600);
+  // With life support running the crew use one crew-hour per hour, exactly as
+  // before. With it off they are on emergency oxygen and burn through it four
+  // times as fast — which is what makes ECLSS part of the power-up and not
+  // just another switch.
+  if (S.craft.crew && !S.dock.air.fan) {
+    const rate = sysOn('ECLSS') ? 1 : 4;
+    S.craft.o2 = Math.max(0, S.craft.o2 - S.craft.crew * rate * dt / 3600);
+  }
   // radiative equilibrium, relaxed
   const eq = Math.pow(Math.max(D.flux,1) * 0.28 / (4 * 5.670374e-8 * 0.85), 0.25) - 273.15;
   const k = 1 - Math.exp(-dt / 5400);
@@ -681,6 +900,17 @@ function stepAttitude(dt) {
   // Mated to a station the vehicle has no attitude of its own — the interface
   // holds it. stepDock places it each step.
   if (S.dock.phase !== 'FREE') { a.rate = 0; a.slewing = false; return; }
+  // No wheels, no attitude control at all.
+  //
+  // Note that the platform is NOT checked here. Without an aligned platform
+  // nothing can command a new reference — HOLD is refused and a cold vehicle
+  // boots in FREE — but the wheels themselves still turn the vehicle, so an
+  // autopilot that was already chasing a reference when the bus dropped goes
+  // on chasing it the moment the wheels come back. That turning is exactly
+  // what fouls the re-alignment that follows a bus trip, and HOLD FREE is the
+  // way to stop it. Gating the wheels on the platform here would make that
+  // interaction unreachable and the alignment impossible to disturb.
+  if (!sysOn('ATT')) { a.rate = 0; a.slewing = false; return; }
   if (a.mode === 'FREE' || dt <= 0) { a.rate = 0; a.slewing = false; return; }
   const maxRate = c.slewRate || 4*Math.PI/180;
   const accel   = c.slewAccel || 2*Math.PI/180;
@@ -1068,6 +1298,10 @@ function dockAutoStep(dt) {
   if (!dk.auto || dk.phase !== 'FREE') return;
   const g = dockGeom();
   if (!g) { dk.auto = false; return; }
+  // The autopilot flies on the same thrusters a hand does. No pressure, no
+  // thrusters — and it says so rather than quietly coasting past the station.
+  if (!sysOn('PRESS')) { dk.auto = false;
+    say('AUTO DOCK DISENGAGED · propulsion is no longer pressurised.', 'err'); return; }
   dk.autoT = (dk.autoT || 0) + dt;
   if (dk.autoT < 2) return;                 // thrusters fire at most every 2 s
   dk.autoT = 0;
@@ -1203,6 +1437,12 @@ function advance(dtSim) {
       // never step past an armed burn's ignition point, however fast the clock runs
       const ti = timeToIgnition();
       if (isFinite(ti) && ti > 0) cap = Math.min(cap, Math.max(0.25, ti));
+      // A warm-up is a countdown, not a controller, so it settles inside any
+      // chunk — but charging a 45 s start-up a 300 s chunk of draw would make
+      // the power budget nonsense, and a 200 s chunk would step clean over the
+      // whole guidance alignment. Bound the chunk while anything is starting.
+      // A warm mission never has anything starting, so this never touches one.
+      if (sysStarting()) cap = Math.min(cap, 10);
       // Docking is centimetre work and the coasting chunk is sized for orbits:
       // 17 s at station altitude, nearly two metres of travel at a docking
       // closing rate. That steps straight over a capture envelope measured in
@@ -1254,6 +1494,32 @@ function checkHazards() {
   if (S.power.batt <= 0 && S.power.gen < S.power.load) {
     if (!S.warnedPower) { S.warnedPower = true; say('CAUTION · BUS UNDERVOLT — battery depleted, shed load (PWR)', 'err'); }
   } else S.warnedPower = false;
+
+  // Nobody should meet the bus trip without being told it is coming. Called
+  // when there is less than a quarter of an hour of bus left on the battery.
+  if (sysOn('BUS') && D.gen + D.tie < D.load && D.load > 0) {
+    const mins = S.power.batt / (D.load - D.gen - D.tie) * 60;
+    if (mins < 15 && !S.warnedBus) {
+      S.warnedBus = true;
+      say(`CAUTION · ${mins.toFixed(0)} MIN OF BUS LEFT on the battery.`
+        + (sysOn('ARRAY') ? ' Shed load or wait for sunlight.' : ' The arrays are still stowed — deploy them, or shed load.')
+        + ' At zero the bus trips and everything downstream of the battery drops, alignment included.', 'warn');
+    } else if (mins > 25) S.warnedBus = false;
+  } else S.warnedBus = false;
+
+  // Air. Oxygen depletes for real, and running out now ends the flight — so it
+  // is called a day out, again four hours out, and the endurance sits on the
+  // LIFE page the whole time. Nobody should ever be surprised by this.
+  if (S.craft.crew > 0) {
+    const hrs = S.craft.o2 / S.craft.crew;
+    if (S.craft.o2 <= 0)
+      return loseMission(`CREW LOST — oxygen exhausted after ${fmtMET(S.t)}. ${S.craft.crew} aboard, and the tanks are dry.`);
+    if (hrs < 4 && S.o2Warn < 2) { S.o2Warn = 2;
+      say(`WARNING · OXYGEN ${fmtT(hrs*3600)} REMAINING — ${sysOn('ECLSS') ? 'this is the last of it' : 'life support is OFF and the crew are on emergency oxygen at four times the rate'}. Get onto a station\'s ECLSS or end the flight.`, 'err'); }
+    else if (hrs < 24 && S.o2Warn < 1) { S.o2Warn = 1;
+      say(`CAUTION · OXYGEN ${fmtT(hrs*3600)} REMAINING for ${S.craft.crew} crew.${sysOn('ECLSS') ? '' : ' Life support is OFF — bring ECLSS up and the rate drops to a quarter.'}`, 'warn'); }
+    else if (hrs >= 24 && S.o2Warn) S.o2Warn = 0;
+  }
 
   const tl = S.thermLimit || 800;
   if (S.therm.hull > tl*0.8 && !S.warnedTherm) { S.warnedTherm = true; say(`CAUTION · HULL ${S.therm.hull.toFixed(0)} °C — limit is ${tl} °C`, 'warn'); }
@@ -1658,6 +1924,18 @@ function updateHUD() {
   set('r-warp', S.warp === 0 ? 'HOLD' : S.warp.toLocaleString('en-US') + '×');
   set('r-soi', b.name);
   set('r-dv', fmtDV(d.dv || 0));
+  // No avionics, no navigation. The vehicle is still out there doing exactly
+  // what it was doing; you simply cannot see any of it.
+  if (!sysOn('AVIO')) {
+    for (const id of ['d-alt','d-vel','d-apo','d-tapo','d-per','d-tper','d-ecc','d-prd']) set(id, '——');
+    set('k-apo', 'Apo'); set('k-tapo', 'T−Apo'); set('k-per', 'Peri'); set('k-tper', 'T−Peri');
+    for (const id of ['d-apo','d-tapo','d-per']) document.getElementById(id).parentElement.className = 'ro';
+    const lamp0 = document.getElementById('r-lamp');
+    const dead = !sysOn('BATT');
+    lamp0.textContent = dead ? 'DARK' : 'NO NAV DATA';
+    lamp0.className = 'lamp ' + (dead ? 'crit' : 'caution');
+    return;
+  }
   set('d-alt', fmtDist(d.alt));
   set('d-vel', Math.abs(d.e.v) < 1 ? (d.e.v*1000).toFixed(0)+' m/s' : d.e.v.toFixed(2)+' km/s');
   // Below 60 km on a landing, apsides stop meaning anything and the two numbers
@@ -1695,7 +1973,9 @@ function updateHUD() {
   else if (S.burn)              { txt = 'ENGINE ' + S.burn.dir; cls = 'caution'; }
   else if (S.power.batt <= 0.1) { txt = 'BUS UNDERVOLT'; cls = 'crit'; }
   else if (d.perAlt < 0)        { txt = 'IMPACT TRAJ'; cls = 'crit'; }
+  else if (S.craft.crew > 0 && S.craft.o2 / S.craft.crew < 4) { txt = 'OXYGEN LOW'; cls = 'crit'; }
   else if (S.therm.hull > (S.thermLimit||800)*0.8) { txt = 'THERMAL'; cls = 'caution'; }
+  else if (S.craft.crew > 0 && S.craft.o2 / S.craft.crew < 24) { txt = 'OXYGEN'; cls = 'caution'; }
   else if (S.power.batt < S.power.battMax*0.2) { txt = 'LOW POWER'; cls = 'caution'; }
   else if (S.sched)             { txt = 'BURN ARMED'; cls = 'caution'; }
   if (lamp.textContent !== txt) lamp.textContent = txt;
@@ -1726,6 +2006,10 @@ function startBurn(dir, dur, scheduled) {
   if (S.dock.phase !== 'FREE') return say('MATED TO THE STATION — the main engine is inhibited. UNDOCK first.', 'err');
   if (S.craft.fuel <= 0) return say('No main propellant remaining.', 'err');
   if (S.burn) return say('Engine already lit. CANCEL first.', 'err');
+  if (!sysOn('PRESS')) return say('PROPULSION NOT PRESSURISED — the main engine will not light on unpressurised tanks. Bring PROPULSION up on the SYS page.', 'err');
+  if (!sysOn('GNC')) return say(sysState('GNC') === 'START'
+    ? `GUIDANCE ALIGNING — ${fmtT(alignLeft())} to go. The engine has no attitude reference until the platform is aligned.`
+    : 'GUIDANCE NOT ALIGNED — without an aligned platform there is no attitude reference and the engine will not light. Bring GUIDANCE up on the SYS page.', 'err');
   S.preBurnWarp = S.warp;
   if (S.warp > 10) S.warp = 10;
   setAttMode(dir);
@@ -1765,7 +2049,11 @@ function exec(raw) {
   case 'STAT': case 'PFD': case 'ORB': return gotoPage('ORB');
   case 'NAV': case 'ORBIT': return gotoPage('ORB', 1);
   case 'MSG': case 'MESSAGES': return gotoPage('MSG');
-  case 'MENU': case 'INDEX': case 'SYS': case 'STATUS': return gotoPage('MENU');
+  case 'MENU': case 'INDEX': case 'STATUS': return gotoPage('MENU');
+  case 'SYS': case 'SYSTEMS': return cmdSys(A, false);
+  case 'START': return cmdSys(A, false);
+  case 'STOP': case 'SHED': return cmdSys(A, true);
+  case 'BATT': case 'BATTERY': return cmdSys(['BATT'], A[0] === 'OFF');
   case 'TIME': case 'CLK': {
     say(`MET ${fmtMET(S.t)} · WARP ${S.warp === 0 ? 'HOLD' : S.warp + '×'}`, 'sys');
     return gotoPage('ORB');
@@ -1812,6 +2100,12 @@ function exec(raw) {
     const dir = DIRS[A[0]] || extra[A[0]];
     if (!dir) return say('Usage: HOLD <PRO|RET|RIN|ROUT|TGT|ATGT|DOCK|FREE>', 'err');
     if (S.dock.phase !== 'FREE') return say('MATED — the interface holds the attitude.', 'err');
+    if (!sysOn('ATT')) return say('ATTITUDE CONTROL IS OFF — the reaction wheels are not running. Bring ATTITUDE up on the SYS page.', 'err');
+    // FREE is always available: it is how you stop the vehicle turning, which
+    // is the remedy when a slew is fouling an alignment.
+    if (dir !== 'FREE' && !sysOn('GNC')) return say(sysState('GNC') === 'START'
+      ? `GUIDANCE ALIGNING — ${fmtT(alignLeft())} to go. There is no attitude reference to hold against until it finishes.`
+      : 'GUIDANCE NOT ALIGNED — the platform has no attitude reference. Bring GUIDANCE up on the SYS page.', 'err');
     if (dir === 'PAXS' && !dockGeom()) return say('No docking target. Try  TGT STATION.', 'err');
     setAttMode(dir);
     return say(`ATTITUDE HOLD · ${ATTNAME[dir]}`, 'sys');
@@ -1877,12 +2171,56 @@ function exec(raw) {
 
 /* ---- readout pages ---------------------------------------- */
 function cmdPwr(A) {
-  if (A && A[0] && ['HEAT','SCI','COMM'].includes(A[0])) {
+  const a = (A && A[0]) || '';
+  // The three switched loads keep their old meaning and their old draws.
+  if (['HEAT','SCI','COMM'].includes(a)) {
     const on = A[1] !== 'OFF';
-    S.loads[A[0]] = on;
-    return say(`${A[0]} LOAD ${on ? 'ON' : 'OFF'}`, 'sys');
+    S.loads[a] = on;
+    const eq = { HEAT:'THERM', COMM:'COMM', SCI:'BUS' }[a];
+    if (on && !sysOn(eq))
+      return say(`${a} LOAD SWITCHED ON — but ${SYSDEF[eq].name} is not running, so it is drawing nothing and doing nothing.`, 'warn');
+    return say(`${a} LOAD ${on ? 'ON' : 'OFF'}`, 'sys');
+  }
+  if (a === 'UP' || a === 'SEQ') {
+    if (SYSIDS.every(id => !sysFitted(id) || sysOn(id))) return say('Everything is already running.', 'sys');
+    sysStart('BATT');
+    S.pwrUp = true;
+    say(`AUTO POWER-UP RUNNING · each system started the moment its prerequisites are up. It takes the same ${Math.round(ALIGN_TIME/60)+' to '+Math.round((ALIGN_TIME+120)/60)} minutes it takes by hand — the alignment is the long pole either way. Hold the attitude steady while it runs.`, 'key');
+    return gotoPage('SYS');
+  }
+  if (a === 'DOWN' || a === 'DARK' || a === 'COLD') {
+    S.pwrUp = false; sysBoot([]); setAttMode('FREE');
+    say('VEHICLE POWERED DOWN · every system off and the console with them. The battery tie is the way back.', 'warn');
+    return gotoPage('SYS');
   }
   gotoPage('PWR');
+}
+
+/** START / STOP a single system, and the SYS page's line-select keys. */
+const SYSALIAS = { BATTERY:'BATT', BUSS:'BUS', AVIONICS:'AVIO', ARRAYS:'ARRAY', SOLAR:'ARRAY',
+                   THERMAL:'THERM', HEAT:'THERM', LIFE:'ECLSS', AIR:'ECLSS', O2:'ECLSS',
+                   ATTITUDE:'ATT', RCS:'PRESS', PROP:'PRESS', PROPULSION:'PRESS',
+                   GUIDANCE:'GNC', IMU:'GNC', ALIGN:'GNC', TX:'COMM', RADIO:'COMM' };
+function cmdSys(A, stop) {
+  const a = (A && A[0]) || '';
+  if (!a) return gotoPage('SYS');
+  const id = SYSDEF[a] ? a : SYSALIAS[a];
+  if (!id || !SYSDEF[id])
+    return say(`No system "${a}". SYS lists them: ${SYSIDS.join(' · ')}.`, 'err');
+  if (stop) {
+    if (!sysFitted(id)) return say(`${SYSDEF[id].name} is not fitted to this vehicle.`, 'err');
+    if (sysState(id) === 'OFF') return say(`${SYSDEF[id].name} is already off.`, 'sys');
+    const downstream = SYSIDS.filter(x => x !== id && sysState(x) !== 'OFF' && SYSDEF[x].needs.includes(id));
+    sysStop(id);
+    return say(`${SYSDEF[id].name} OFF.`
+      + (downstream.length ? ` ${downstream.map(x => SYSDEF[x].name).join(' and ')} went with it.` : ''), 'warn');
+  }
+  const refusal = sysStart(id);
+  if (refusal) return say(refusal, 'err');
+  const d = SYSDEF[id];
+  if (id === 'GNC')
+    return say(`PLATFORM ALIGNMENT RUNNING · ${ALIGN_TIME} s, and only while the vehicle is held steady. Watch the residual drift fall — it has to reach ${ALIGN_OK.toFixed(2)} °/h. Turning the vehicle pushes it back.`, 'key');
+  return say(d.warm > 0 ? `${d.name} STARTING · ${d.warm} s.` : `${d.name} ON LINE.`, d.warm > 0 ? 'key' : 'ok');
 }
 </script>
 
@@ -2136,6 +2474,8 @@ function transferWindow(tk) {
 }
 
 function cmdPlan(A) {
+  // The solver IS the flight computer. No avionics, no solutions.
+  if (!sysOn('AVIO')) return say('AVIONICS OFF — the flight computer is not running, so there is nothing to solve manoeuvres with. Bring AVIONICS up on the SYS page.', 'err');
   const b = D.b, mu = b.mu, e = D.e, sub = A[0] || '';
 
   if (sub === 'CIRC' || sub === 'CIRCULARIZE') {
@@ -2343,6 +2683,9 @@ function cmdTrans(A) {
   const t = targetRel();
   const mode = A[0] || '';
   if (mode === 'ON' || mode === 'OFF') return say('RCS is always available while propellant remains. Use TRANS to translate.', 'sys');
+  // Unpressurised tanks are true whether or not a target has been picked, so
+  // this is said before the vehicle is asked what it is aiming at.
+  if (!sysOn('PRESS')) return say('PROPULSION NOT PRESSURISED — the RCS thrusters have no propellant pressure. Bring PROPULSION up on the SYS page.', 'err');
   if (!t) return say('No target set. Try  TGT STATION.', 'err');
   if (S.dock.phase !== 'FREE') return say('MATED TO THE STATION — release the latches before translating.', 'err');
   // Inside the corridor the thruster frame is the docking axis, not the line
@@ -2370,6 +2713,11 @@ function cmdTrans(A) {
   if (dv > rcsDV()) return say(`Only ${fmtDV(rcsDV())} of RCS remains.`, 'err');
   const used = rcsPulse(dirv, dv);
   say(`RCS pulse · ${fmtDV(dv)} ${mode.toLowerCase()}${onAxis ? ' (dock axis)' : ''}  (${used.toFixed(3)} kg)`, 'key');
+  // A platform that has just been shaken has to re-settle, and most of that
+  // cost is in the firing itself rather than in how big it was — hence the
+  // fixed term. A trim pulse costs about half a minute of the three; leaning
+  // on the thrusters costs a good deal more.
+  disturbAlign(25 + dv * 50, 'thrusters fired');
   derive();
   const ng = dockGeom();
   if (ng && onAxis) say(`Axial ${fmtRange(ng.axial)}  closing ${fmtRate(ng.closing)}   lateral ${fmtRange(ng.lateral)} at ${fmtRate(ng.latRate)}`, 'out');
@@ -2396,6 +2744,10 @@ function cmdDock(A) {
     // Matches the DOCK page's NOT FITTED and M-03's own briefing: AURIGA-3 does
     // not carry the equipment. It is a different vehicle, not a disabled key.
     if (S.mission && S.mission.noAuto) return no('AUTO DOCK is not fitted to this vehicle — fly the approach by hand.');
+    if (!dk.auto && !sysOn('PRESS')) return no('PROPULSION NOT PRESSURISED — the autopilot has no thrusters to fly with. Bring PROPULSION up on the SYS page.');
+    // The autopilot points the vehicle down the port axis, so it needs the
+    // same aligned platform a hand-flown approach needs.
+    if (!dk.auto && !sysOn('GNC')) return no('GUIDANCE NOT ALIGNED — the autopilot has no attitude reference to fly the corridor against.');
     dk.auto = !dk.auto; dk.autoT = 0;
     if (dk.auto) setAttMode('PAXS');
     return say(dk.auto ? 'AUTO DOCK ENGAGED · flying the corridor on RCS. Keep an eye on the budget.'
@@ -2623,7 +2975,12 @@ const MISSIONS = [
   hint:'PLAN XFER MOON',
   setup(){ rig({name:'SELENE-1', dry:3400, fuel:8600, thrust:90, isp:315, rcs:30});
     setOrbit('EARTH', 200, 200, 0, 200);
-    S.power.battMax = 1400; S.power.batt = 1400; S.power.area = 22; },
+    // 4400 Wh, not the 1400 this mission used to carry. A translunar coast
+    // crosses Earth's shadow for 10.6 hours out near apogee, where the
+    // vehicle is barely moving — 3,350 Wh at this vehicle's bus load. It has
+    // always been that long; the battery going flat simply had no
+    // consequence before, and now that the bus trips it would end the flight.
+    S.power.battMax = 4400; S.power.batt = 4400; S.power.area = 22; },
   obj:[
     { text:'Reach the Moon — enter lunar sphere of influence', check:(s)=> s.soi === 'MOON' },
     { text:'Return to Earth reference after the flyby', check:(s)=> s.soi === 'EARTH' && s.flags.lunarSOI },
@@ -2636,9 +2993,17 @@ const MISSIONS = [
     'Arriving inside the Moon\'s sphere of influence you will be on a {hyperbolic} pass — faster than lunar escape velocity. Burn {retrograde} near closest approach to bleed off enough speed for the Moon to keep you.',
     'That is lunar orbit insertion. Miss it and you sail straight back out.'],
   hint:'PLAN XFER MOON  →  PLAN CIRC PE after capture',
-  setup(){ rig({name:'SELENE-2', dry:3600, fuel:16000, thrust:110, isp:315, rcs:30, crew:3, o2:900});
+  // 2400 crew-hours, not 900. The flight to lunar orbit takes 78 hours, so
+  // 900 was a 3.9x margin — an order of magnitude thinner than any other
+  // crewed mission, and thin enough to matter now that running out of air
+  // ends the flight. Warp runs to a million times: one careless frame at
+  // that rate is four and a half hours of air. 2400 makes it 10x, in line
+  // with the rest of the ladder.
+  setup(){ rig({name:'SELENE-2', dry:3600, fuel:16000, thrust:110, isp:315, rcs:30, crew:3, o2:2400});
     setOrbit('EARTH', 200, 200, 0, 200);
-    S.power.battMax = 1800; S.power.batt = 1800; S.power.area = 26; },
+    // 4600 Wh — same 10.6-hour shadow crossing as M-04, and this vehicle is
+    // crewed, so it carries life support through it too. See M-04.
+    S.power.battMax = 4600; S.power.batt = 4600; S.power.area = 26; },
   obj:[
     { text:'Enter the Moon\'s sphere of influence', check:(s)=> s.soi === 'MOON' },
     { text:'Capture into lunar orbit (closed, periapsis above 20 km)',
@@ -2713,14 +3078,24 @@ const MISSIONS = [
 {
   id:0, code:'FREE', name:'FREE FLIGHT',
   brief:[
-    'No objectives. Full tanks, {200 km} Earth orbit, the Moon three days away and the whole system open.',
-    'Station {CERES} is up at {400 km} and will take a docking: TGT STATION, PLAN RDV, then DOCK. AUTO DOCK is fitted to this vehicle, and the station will refuel you once you are hard docked.',
-    'Everything the missions teach works here. PLAN will solve any maneuver you ask it for.'],
-  hint:'PLAN XFER MOON · TGT STATION → PLAN RDV · PLAN ESC',
-  setup(){ rig({name:'TESTBED', dry:2500, fuel:20000, thrust:60, isp:340, rcs:200, crew:1, o2:9000});
-    setOrbit('EARTH', 200, 200, 0, 0);
+    'This vehicle is {cold and dark}. Nothing is running, the arrays are stowed, and you are in {eclipse} with about a quarter of an hour until sunrise and a fifth of a battery to spend on it.',
+    'Close the battery tie, then bring the systems up in an order that works: the bus feeds everything, the avionics feed the guidance and the propulsion, and the guidance platform needs {three minutes} of alignment with the vehicle held still. Get the arrays out before the battery goes. {SYS} lists it all, and {PWR UP} will run the sequence for you at the same speed.',
+    'Draw more than the battery can carry and the bus trips — you lose everything downstream of it, alignment included.',
+    'Then it is yours. Full tanks, {200 km} Earth orbit, the Moon three days away. Station {CERES} is up at {400 km} and will take a docking: TGT STATION, PLAN RDV, then DOCK. AUTO DOCK is fitted, and the station will refuel you once you are hard docked.'],
+  hint:'BATT → SYS BUS → SYS AVIO → SYS ARRAY → SYS ATT → SYS GNC',
+  // The sandbox is the one place that starts dark: the scripted missions are
+  // lessons in orbital mechanics and stay warm. A mission may name any subset.
+  sys: [],
+  setup(){ rig({name:'TESTBED', dry:2500, fuel:20000, thrust:60, isp:340, rcs:200, crew:1, o2:90000});
+    // Placed in the Earth's shadow, about fifteen minutes short of sunrise: the
+    // arrays are worth nothing until then and the battery is all there is.
+    setOrbit('EARTH', 200, 200, 78, 0);
     S.objects = [ makeStation('EARTH', 400, 25) ];
-    S.power.battMax = 4000; S.power.batt = 4000; S.power.area = 60; },
+    // A fifth of a 1200 Wh pack is about twenty-five minutes at a full bus
+    // load, against roughly fifteen minutes of eclipse left to run. Brisk is
+    // comfortable; idling with everything on is not. Sunrise and 60 m² of
+    // array refill it in about three minutes.
+    S.power.battMax = 1200; S.power.batt = 240; S.power.area = 60; },
   obj:[]
 },
 ];
@@ -2740,13 +3115,26 @@ function loadMission(id) {
   S.therm.hull = 20; S.ledger = { dvUsed:0, burns:0 };
   S.loads = { HEAT:true, SCI:false, COMM:true };
   S.flags = { lunarSOI:false, perihelionPassed:false };
-  S.warnedPower = S.warnedTherm = S.warnedAtmo = false;
+  S.warnedPower = S.warnedTherm = S.warnedAtmo = S.warnedBus = false;
+  S.o2Warn = 0;
   m.setup();
+  // Which systems this vehicle wakes up with. `sys` omitted means all of them,
+  // which is how every scripted mission has always booted and still does; an
+  // explicit list is the cold (or partly cold) case, and [] is fully dark.
+  sysBoot(m.sys);
   S.att.theta = commandedTheta('PRO');   // vehicles start pointed prograde
+  // A dark vehicle has no platform to hold an attitude against.
+  if (!sysOn('GNC')) S.att.mode = 'FREE';
   S.mission = m;
   S.objectives = m.obj.map(o => ({ ...o, done:false }));
   derive(); fitView();
   logEl.innerHTML = '';
+  // The scratchpad belongs to the flight that just ended. Leaving a standing
+  // caution from the last one there means the message priority rule — a
+  // lower-severity line cannot displace a higher one inside six seconds — then
+  // swallows whatever this mission needs to say on arrival, which for a dark
+  // vehicle is the one instruction telling the player how to wake it up.
+  clearMessage();
   head(`${m.code} · ${m.name}`);
   m.brief.forEach(b => { say(b, 'out'); say(''); });
   if (S.objectives.length) {
@@ -2756,7 +3144,16 @@ function loadMission(id) {
   say('');
   if (m.hint) row('PROCEDURE', m.hint, 'ok');
   row('CLOCK', 'HOLD', 'sys');
-  if (typeof gotoPage === 'function') gotoPage('MSN');
+  // Said last and at warning severity so it is the line standing on the
+  // scratchpad when the player looks up at a display that is telling them
+  // nothing. A dark console has to say how to stop being dark.
+  if (!sysOn('BATT'))
+    say('CONSOLE UNPOWERED · close the battery tie — the one lit key — to bring the flight deck up.', 'warn');
+  else if (!sysOn('AVIO'))
+    say('VEHICLE PARTLY POWERED · SYS lists what is running and what is not.', 'warn');
+  // A dark vehicle opens on its systems page, so closing the battery tie lands
+  // the player exactly where the rest of the sequence is.
+  if (typeof gotoPage === 'function') gotoPage(sysOn('AVIO') ? 'MSN' : 'SYS');
   saveProgress();
 }
 
@@ -2794,7 +3191,9 @@ function checkObjectives() {
 function cmdMis(A) {
   if (A[0] !== undefined && A[0] !== '') {
     const n = parseInt(A[0], 10);
-    if (!isNaN(n) && MISSIONS.some(m => m.id === n)) { loadMission(n); gotoPage('MSN'); return; }
+    // loadMission picks the landing page itself — MISSION for a warm vehicle,
+    // SYSTEMS for one that boots dark. Forcing MSN here overrode that.
+    if (!isNaN(n) && MISSIONS.some(m => m.id === n)) { loadMission(n); return; }
     return say('USAGE   MIS <number>', 'err');
   }
   gotoPage('ROSTER');
@@ -2996,19 +3395,35 @@ function gotoPage(id, sub) {
   renderCDU();
 }
 
+/* The console runs off the battery like everything else. Until the battery tie
+   is closed there is nothing to render — and one lit key, because a dead screen
+   with no way out of it is a bug rather than atmosphere. */
+function darkRows() {
+  return [
+    { l: F('Flight deck', 'DARK', 'dim'), r: F('Main bus', 'NO POWER', 'dim') },
+    { full: F('', '<CLOSE BATTERY TIE*', 'go', () => exec('BATT')) },
+    { full: F('', 'Every system aboard is off, this display with them. The battery tie is a mechanical switch and needs no power to throw — close it, and the console comes up on the systems page.', 'body'), wrap: true },
+    {}, {}, {},
+  ];
+}
+
 function renderCDU() {
+  const dark = !sysOn('BATT');
   const def = PAGES[CDU.page] || PAGES.ORB;
   derive();
-  const count = def.count ? Math.max(1, def.count()) : 1;
+  const count = dark ? 1 : (def.count ? Math.max(1, def.count()) : 1);
   if (CDU.sub >= count) CDU.sub = count - 1;
   if (CDU.sub < 0) CDU.sub = 0;
   let rows = [];
-  try { rows = def.build(CDU.sub) || []; }
-  catch (err) { rows = [{ full: F('FAULT', String(err.message).slice(0, 40), 'bad') }]; }
+  if (dark) rows = darkRows();
+  else {
+    try { rows = def.build(CDU.sub) || []; }
+    catch (err) { rows = [{ full: F('FAULT', String(err.message).slice(0, 40), 'bad') }]; }
+  }
 
-  document.getElementById('cdu-t').textContent = def.title(CDU.sub);
-  document.getElementById('cdu-sub').textContent = def.sub ? def.sub() : '';
-  document.getElementById('cdu-pg').textContent = count > 1 ? `${CDU.sub+1}/${count}` : '';
+  document.getElementById('cdu-t').textContent = dark ? '' : def.title(CDU.sub);
+  document.getElementById('cdu-sub').textContent = dark ? 'UNPOWERED' : (def.sub ? def.sub() : '');
+  document.getElementById('cdu-pg').textContent = (!dark && count > 1) ? `${CDU.sub+1}/${count}` : '';
   document.getElementById('pg-prev').disabled = count < 2;
   document.getElementById('pg-next').disabled = count < 2;
 
@@ -3019,7 +3434,9 @@ function renderCDU() {
     const r = rows[i], g = GROUPS[i];
     const used = i < n;
     g.grp.style.display = used ? '' : 'none';
-    if (!used) continue;
+    // A hidden row must not keep the line-select keys that the last, longer
+    // page left enabled on it.
+    if (!used) { g.kl.disabled = true; g.kr.disabled = true; continue; }
     const isFull = !!(r && r.full);
     g.row.classList.toggle('full', isFull);
     g.row.classList.toggle('bare', !r || (!r.l && !r.r && !r.full));
@@ -3111,8 +3528,13 @@ function numFromScratch(what) {
 const PAGES = {
 
 ORB: { count: () => 2, title: (i) => i ? 'ORBIT' : 'ORBIT',
-  sub: () => soiBody().name,
-  build: (i) => i === 0 ? [
+  sub: () => sysOn('AVIO') ? soiBody().name : 'NO NAV DATA',
+  build: (i) => !sysOn('AVIO') ? [
+    { l: F('Navigation', 'NO DATA', 'bad'), r: F('Avionics', sysState('AVIO') === 'START' ? 'STARTING' : 'OFF', 'go') },
+    { full: F('', 'The flight computer is not running. The vehicle is still exactly where physics is putting it — you simply cannot see any of it, and nothing can be planned or flown until the avionics are up.', 'body'), wrap: true },
+    {}, {}, {},
+    { l: NAV('<SYSTEMS', 'SYS'), r: NAV('MENU>', 'MENU') },
+  ] : i === 0 ? [
     { l: F('Apoapsis', D.escape ? 'ESCAPE' : fmtDist(D.apoAlt)),
       r: F('T−Apo', isFinite(D.tApo) ? fmtT(D.tApo) : '——', '', null) },
     { l: F('Periapsis', fmtDist(D.perAlt), D.perAlt < 0 ? 'bad' : ''),
@@ -3406,6 +3828,49 @@ UTIL: { count: () => 4, title: () => 'UTILITIES',
     ];
   } },
 
+/* The cold-start page. Five systems to a page, each with its state, what it is
+   waiting for, and one key to start or stop it. Any order that satisfies the
+   graph works — the graph is the puzzle, not a fixed checklist. */
+SYS: { count: () => 2, title: () => 'SYSTEMS',
+  sub: () => {
+    const pct = S.power.battMax ? S.power.batt / S.power.battMax * 100 : 0;
+    return `${D.load.toFixed(0)} W · BATT ${pct.toFixed(0)}%`;
+  },
+  build: (pg) => {
+    const rows = SYSTEMS.slice(pg*5, pg*5 + 5).map(d => {
+      const st = sysState(d.id), s = S.sys[d.id] || { t:0 };
+      if (!sysFitted(d.id))
+        return { l: F(`${d.tag} · ${d.name}`, 'NOT FITTED', 'dim'), r: F('', '——', 'dim') };
+      let detail, cls, act = null, key = '', keyCls = 'dim';
+      if (st === 'ON') {
+        detail = d.id === 'GNC' ? 'ALIGNED · drift 0.00 °/h' : 'RUNNING · ' + d.draw + ' W';
+        cls = 'ok'; key = 'STOP*'; keyCls = 'sel'; act = () => exec('STOP ' + d.id);
+      } else if (st === 'START') {
+        const left = Math.max(0, d.warm - s.t);
+        detail = d.id === 'GNC'
+          ? `ALIGNING · drift ${s.drift.toFixed(2)} °/h · T−${fmtT(left)}`
+          : d.id === 'ARRAY'
+            ? `DEPLOYING · ${gauge(s.t/d.warm)} ${(s.t/d.warm*100).toFixed(0)}%`
+            : `STARTING · T−${fmtT(left)}`;
+        cls = 'go'; key = '——'; keyCls = 'dim';
+      } else {
+        const block = sysBlocker(d.id);
+        detail = block ? 'NEEDS ' + SYSDEF[block].tag : 'READY · ' + (d.warm ? d.warm + ' s' : 'instant');
+        cls = block ? 'dim' : '';
+        key = 'START*'; keyCls = block ? 'dim' : 'go';
+        act = () => exec('START ' + d.id);
+      }
+      return { l: F(`${d.tag} · ${d.name}`, detail, cls, act), r: F('', key, keyCls, act) };
+    });
+    while (rows.length < 5) rows.push({});
+    rows.push(pg === 0
+      ? { l: NAV('<ELECTRICAL', 'PWR'),
+          r: F('', S.pwrUp ? 'SEQUENCE RUNNING' : 'AUTO POWER-UP*', S.pwrUp ? 'go' : 'sel',
+               S.pwrUp ? null : () => exec('PWR UP')) }
+      : { l: NAV('<MENU', 'MENU'), r: NAV('ELECTRICAL>', 'PWR') });
+    return rows;
+  } },
+
 PWR: Object.assign(one('ELECTRICAL'), {
   sub: () => D.ecl ? 'ECLIPSE' : 'SUNLIT',
   build: () => {
@@ -3423,8 +3888,9 @@ PWR: Object.assign(one('ELECTRICAL'), {
       { l: F('Heaters', S.loads.HEAT ? 'ON' : 'OFF', S.loads.HEAT ? 'sel' : 'dim', tog('HEAT')),
         r: F('Transmitter', S.loads.COMM ? 'ON' : 'OFF', S.loads.COMM ? 'sel' : 'dim', tog('COMM')) },
       { l: F('Science', S.loads.SCI ? 'ON' : 'OFF', S.loads.SCI ? 'sel' : 'dim', tog('SCI')),
-        r: F('Solar flux', D.flux.toFixed(0) + ' W/m²') },
-      menuRow('FUEL>', 'FUEL'),
+        r: F('Solar array', sysOn('ARRAY') ? 'DEPLOYED' : sysState('ARRAY') === 'START' ? 'DEPLOYING' : 'STOWED',
+             sysOn('ARRAY') ? 'ok' : 'go') },
+      { l: NAV('<MENU', 'MENU'), r: NAV('SYSTEMS>', 'SYS') },
     ];
   } }),
 
@@ -3473,17 +3939,28 @@ COMM: Object.assign(one('COMMUNICATIONS'), { sub: () => S.loads.COMM ? 'TX ON' :
 
 LIFE: Object.assign(one('LIFE SUPPORT'), { sub: () => S.craft.crew ? S.craft.crew + ' CREW' : 'UNCREWED', build: () => {
   if (!S.craft.crew) return [{ full: F('', 'UNCREWED VEHICLE', 'dim') }, {}, {}, {}, {}, menuRow('POWER>', 'PWR')];
-  const hrs = S.craft.o2 / S.craft.crew;
+  // Oxygen is lethal now, so the endurance is the headline number and the rate
+  // that produces it is right underneath, with life support off multiplying it.
+  const fan = S.dock.air.fan, live = sysOn('ECLSS');
+  const rate = fan ? 0 : S.craft.crew * (live ? 1 : 4);      // crew-hours per hour
+  const hrs = rate > 0 ? S.craft.o2 / rate : Infinity;
   return [
-    { l: F('Crew', String(S.craft.crew)), r: F('O₂ remaining', fmtT(hrs*3600), hrs < 24 ? 'go' : 'ok') },
-    { l: F('Cabin pressure', S.power.batt > 0 ? '101.3 kPa' : 'LOST', S.power.batt > 0 ? 'ok' : 'bad'),
-      r: F('Cabin temperature', S.power.batt > 0 ? '21.1 °C' : '—') },
-    { l: F('CO₂ scrubber', S.loads.HEAT ? 'NOMINAL' : 'OFFLINE', S.loads.HEAT ? 'ok' : 'bad'),
-      r: F('Crew-hours', S.craft.o2.toFixed(0)) },
-    { l: F('O₂ source', S.dock.air.fan ? 'STATION ECLSS' : 'ONBOARD', S.dock.air.fan ? 'ok' : ''),
-      r: S.dock.phase === 'HARD' ? NAV('UTILITIES>', 'UTIL') : F('', '', 'dim') },
-    {},
-    menuRow('POWER>', 'PWR'),
+    { l: F('O₂ endurance', fan ? 'STATION SUPPLY' : fmtT(hrs*3600), hrs < 4 ? 'bad' : hrs < 24 ? 'go' : 'ok'),
+      r: F('Consumption', rate.toFixed(0) + ' crew-h / h', live || fan ? 'ok' : 'bad') },
+    { l: F('Life support', live ? 'RUNNING' : sysState('ECLSS') === 'START' ? 'STARTING' : 'OFF',
+           live ? 'ok' : 'bad'),
+      r: F('Crew-hours left', S.craft.o2.toFixed(0)) },
+    { l: F('Cabin pressure', live || fan ? '101.3 kPa' : 'SUIT LOOP', live || fan ? 'ok' : 'go'),
+      r: F('Cabin temperature', live || fan ? '21.1 °C' : '—') },
+    { l: F('CO₂ scrubber', live ? 'NOMINAL' : fan ? 'STATION' : 'OFFLINE', live || fan ? 'ok' : 'bad'),
+      r: F('Crew', String(S.craft.crew)) },
+    { full: F('', fan
+        ? 'The station is supplying and scrubbing the air through the hatch. Nothing of yours is being used.'
+        : live
+          ? 'Life support is running and the crew are using one crew-hour per hour each. Reaching zero is fatal — you are told a day out and again four hours out.'
+          : 'LIFE SUPPORT IS OFF. The crew are on emergency oxygen at four times the normal rate. Bring ECLSS up on the systems page.', live || fan ? 'body' : 'go'), wrap: true },
+    { l: NAV('<SYSTEMS', 'SYS'),
+      r: S.dock.phase === 'HARD' ? NAV('UTILITIES>', 'UTIL') : NAV('POWER>', 'PWR') },
   ]; } }),
 
 MSN: {
@@ -3516,7 +3993,7 @@ ROSTER: { count: () => Math.ceil(MISSIONS.length / 5), title: () => 'MISSION ROS
     const slice = MISSIONS.slice(pg*5, pg*5 + 5);
     const rows = slice.map(m => ({ full: F(done.includes(m.id) ? 'FLOWN' : '',
       `<${m.code}  ${m.name}`, S.mission && S.mission.id === m.id ? 'ok' : 'sel',
-      () => { loadMission(m.id); gotoPage('MSN'); }) }));
+      () => loadMission(m.id)) }));
     rows.push({ l: NAV('<MISSION', 'MSN'), r: NAV('MENU>', 'MENU') });
     return rows;
   } },
@@ -3543,7 +4020,8 @@ MENU: { count: () => 2, title: () => 'INDEX', sub: () => '', build: (pg) => pg =
     { l: NAV('<ELECTRICAL', 'PWR'), r: NAV('PROPULSION>', 'FUEL') },
     { l: NAV('<THERMAL', 'THRM'), r: NAV('COMMUNICATIONS>', 'COMM') },
     { l: NAV('<LIFE SUPPORT', 'LIFE'), r: NAV('ROSTER>', 'ROSTER') },
-    {}, {},
+    { l: NAV('<SYSTEMS', 'SYS'), r: F('Bus load', D.load.toFixed(0) + ' W') },
+    {},
     { l: NAV('<ORBIT', 'ORB'), r: F('', '', 'dim') },
   ] },
 
@@ -3576,7 +4054,16 @@ const HELP_PAGES = [
     ['PLAN', 'PLAN CIRC AP · APO <km> · XFER <BODY>'],
     ['TRANS', 'TRANS TGT|AWAY|PORT|STBD <m/s>'],
     ['DOCK', 'DOCK AUTO|RETRACT|LATCH|RESEAT|UNDOCK'],
+    ['SYS', 'SYS · START <sys> · STOP <sys> · PWR UP'],
     ['PAGES', 'Function keys below, or type the name.'],
+  ] },
+  { t: 'WAKING A DARK VEHICLE', rows: [
+    ['ORDER', 'Battery → bus → avionics → everything else.', 'ok'],
+    ['', 'BATT, then SYS lists the rest with what each one is waiting for.'],
+    ['GUIDANCE', 'Needs attitude control first, then three minutes of alignment. No alignment, no engine.', 'go'],
+    ['ARRAYS', 'Stowed arrays generate nothing. Get them out before the battery goes.'],
+    ['TRIP', 'Flatten the pack and the bus drops everything under it, alignment included.', 'go'],
+    ['SHORTCUT', 'PWR UP runs the whole sequence, at the same speed.'],
   ] },
   { t: 'FLYING AN APPROACH', rows: [
     ['CORRIDOR', 'The port faces aft. Approach up the velocity vector, from behind.', 'ok'],

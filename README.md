@@ -57,7 +57,14 @@ retyped. Every typed command still works.
 
 Nine, in order: orbital insertion, orbit raising, rendezvous and docking, lunar
 flyby, lunar orbit, lunar landing, Earth escape, Mars transfer and capture, and a
-solar dive with a thermal limit. Plus free flight.
+solar dive with a thermal limit.
+
+Plus free flight, which begins **cold and dark**: nothing running, arrays
+stowed, in eclipse with a fifth of a battery. Ten systems, each with
+prerequisites, a warm-up and a power draw; any order that satisfies the graph
+works, the guidance platform wants three minutes of alignment before the engine
+will light, and flattening the battery drops the bus and the alignment with it.
+About four minutes, once you know the order.
 
 ## Development
 
@@ -73,6 +80,7 @@ them under a headless DOM stub, and `tests/browser/` drives it in Chromium.
 | `physics.test.js` | Propagator exactness, apsides, hyperbolic arcs, and that every mission is solvable with the propellant it carries |
 | `missions.test.js` | M-01, M-02, M-07, M-09 flown to completion; planner guards; command surface |
 | `deep.test.js` | Lunar flyby, lunar orbit, landing, Mars capture, rendezvous and docking |
+| `coldstart.test.js` | The cold-start dependency graph, the dark console, guidance alignment, the bus trip, life support and oxygen margins, and that warm missions are untouched |
 | `cdu.test.js` | Every page builds in every mission state, every page reachable, function keys never touch vehicle state, plan → arm → fly from line-select keys |
 | `browser/layout.test.js` | Three screen sizes, key counts, no overflow |
 | `browser/text.test.js` | Nothing clipped, paragraphs wrap, rows never overlap |

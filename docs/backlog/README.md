@@ -7,7 +7,7 @@ constraints and open questions.
 | # | Item | Status | Depends on |
 |---|------|--------|-----------|
 | [01](01-docking.md) | Realistic docking — attitude and mechanics both **done** | Done | — |
-| [02](02-cold-start.md) | Cold start and systems configuration | Not started | — (can run in parallel) |
+| [02](02-cold-start.md) | Cold start and systems configuration | **Done** | — |
 | [03](03-launch.md) | Launch from Earth | Not started | 01 (attitude), 02 (pad state) |
 | [04](04-new-missions.md) | New missions | Awaiting examples | 01 / 03 per mission |
 
@@ -37,7 +37,7 @@ station exists, not only in M-03. Items 02 and 03 are the first two legs.
 | Region | What lives there |
 |--------|------------------|
 | script 1 | Constants, bodies, vector maths, universal-variable Kepler propagation, orbital elements |
-| script 2 | `S` (vehicle state), `derive()`, systems integration, `burnStep`, SOI patching, `advance()` |
+| script 2 | `S` (vehicle state), `derive()`, the `SYSTEMS` cold-start graph, `burnStep`, SOI patching, `advance()` |
 | script 3 | Canvas scope renderer |
 | script 4 | Formatters, `say()`/`row()`/`head()` message store |
 | script 5 | `exec()` command interpreter and subsystem commands |
@@ -46,7 +46,7 @@ station exists, not only in M-03. Items 02 and 03 are the first two legs.
 | script 8 | CDU page framework, `PAGES`, input, fullscreen, main loop, boot |
 
 Tests boot the real page under a DOM stub (`tests/harness.js`) or drive it in
-Chromium (`tests/browser/`). Nine suites; `./tests/run.sh` runs the lot.
+Chromium (`tests/browser/`). Ten suites; `./tests/run.sh` runs the lot.
 
 ## Constraints that apply to every item
 
