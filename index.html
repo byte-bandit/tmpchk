@@ -555,7 +555,8 @@ function freshDock() {
     misalign: 0, misalign0: 0, sign: 1, offset: 0,
     ring: 0, latches: 0, latching: false,
     auto: false, autoT: 0, attempts: 0, bounces: 0, passed: false,
-    vest: { valve:false, press:0, check:-1, leakOk:false, hatch:false },
+    vest: { valve:false, press:0, check:-1, decay:0, leak:0, verdict:null, leakOk:false, hatch:false },
+    reseats: 0,
     pwr:  { umb:false, tie:false },
     air:  { duct:false, fan:false },
     prop: { line:false, purge:0, purged:false, xfer:false, moved:0, done:false },
@@ -846,6 +847,26 @@ function dockContact(g) {
   checkObjectives();
 }
 
+/* ---- the vestibule seal -------------------------------------------------
+   A vestibule that leaks is one that seated badly, so the seal is decided when
+   the LATCHES CLOSE, not when the check is run — re-running a check on a bad
+   seal fails again, and the only fix is to re-seat the interface. A crooked
+   capture seats badly far more often, which is what ties the quality of the
+   approach to the work that follows it.
+
+   Stated failure rate: 1 in 6 after a clean capture, rising to 1 in 2 at the
+   10° alignment limit. A failed seal loses 0.30-1.20 kPa/min against a 0.20 kPa
+   limit over the hold, so it is visible in the Δ within about fifteen seconds —
+   the reading is there to be read, and an attentive crew re-seats early rather
+   than waiting out the full minute. */
+const LEAK_HOLD = 60;        // s — the hold
+const LEAK_LIMIT = 0.20;     // kPa lost over the hold before the seal is rejected
+function rollSeal(misalignAtCapture) {
+  const risk = Math.min(0.5, 1/6 + (misalignAtCapture || 0) * 0.033);
+  return Math.random() < risk ? 0.30 + Math.random() * 0.90     // kPa/min — will fail
+                              : 0.005 + Math.random() * 0.10;   // kPa/min — will pass
+}
+
 /** Air, power, ECLSS and propellant are all connected. */
 const utilitiesDone = () => {
   const d = S.dock;
@@ -892,6 +913,8 @@ function stepDock(dt) {
     dk.latches = Math.min(12, dk.latches + dt * 0.5);
     if (dk.latches >= 12) {
       dk.latches = 12; dk.latching = false; dk.phase = 'HARD';
+      // How well it seated is settled here, and the crew find out at the leak check.
+      dk.vest.leak = rollSeal(dk.misalign0);
       say('HARD DOCK · 12 of 12 structural latches closed. The vestibule is sealed but empty — equalise it before opening a hatch.', 'ok');
       checkObjectives();
     }
@@ -901,11 +924,27 @@ function stepDock(dt) {
 
   const ve = dk.vest;
   if (ve.valve && ve.press < 101.3) ve.press = Math.min(101.3, ve.press + 101.3 * dt / 90);
-  if (ve.check >= 0 && !ve.leakOk) {
-    if (ve.valve) { ve.check = -1; say('LEAK CHECK ABORTED — the equalisation valve reopened.', 'warn'); }
+  // The seal always leaks a little; a bad one leaks a lot. With the valve open
+  // the supply outruns it either way, which is why it only shows on the hold.
+  if (!ve.valve && !ve.hatch && ve.press > 0) {
+    const lost = Math.min(ve.press, ve.leak * dt / 60);
+    ve.press -= lost;
+    if (ve.check >= 0 && !ve.verdict) ve.decay += lost;
+  }
+  if (ve.check >= 0 && !ve.verdict) {
+    if (ve.valve) { ve.check = -1; ve.decay = 0; say('LEAK CHECK ABORTED — the equalisation valve reopened.', 'warn'); }
     else {
       ve.check += dt;
-      if (ve.check >= 60) { ve.leakOk = true; say('LEAK CHECK COMPLETE · 60 s, no measurable decay. The hatch may be opened.', 'ok'); }
+      if (ve.check >= LEAK_HOLD) {
+        ve.check = LEAK_HOLD;
+        if (ve.decay <= LEAK_LIMIT) {
+          ve.verdict = 'PASS'; ve.leakOk = true;
+          say(`LEAK CHECK PASSED · ${ve.decay.toFixed(2)} kPa lost in ${LEAK_HOLD} s, limit ${LEAK_LIMIT.toFixed(2)}. The hatch may be opened.`, 'ok');
+        } else {
+          ve.verdict = 'FAIL';
+          say(`LEAK CHECK FAILED · ${ve.decay.toFixed(2)} kPa lost in ${LEAK_HOLD} s, limit ${LEAK_LIMIT.toFixed(2)}. That seal did not seat — RE-SEAT the interface and run it again. Re-running the check on the same seal will fail again.`, 'err');
+        }
+      }
     }
   }
   const pr = dk.prop;
@@ -2354,7 +2393,9 @@ function cmdDock(A) {
   case 'AUTO': {
     if (dk.phase !== 'FREE') return no('Already captured.');
     if (!g) return no('No docking target. Try  TGT STATION.');
-    if (S.mission && S.mission.noAuto) return no('AUTO DOCK is inhibited for this flight — fly the approach by hand.');
+    // Matches the DOCK page's NOT FITTED and M-03's own briefing: AURIGA-3 does
+    // not carry the equipment. It is a different vehicle, not a disabled key.
+    if (S.mission && S.mission.noAuto) return no('AUTO DOCK is not fitted to this vehicle — fly the approach by hand.');
     dk.auto = !dk.auto; dk.autoT = 0;
     if (dk.auto) setAttMode('PAXS');
     return say(dk.auto ? 'AUTO DOCK ENGAGED · flying the corridor on RCS. Keep an eye on the budget.'
@@ -2402,9 +2443,22 @@ function cmdDock(A) {
     if (dk.phase !== 'HARD') return no('Hard dock required.');
     if (dk.vest.press < 100) return no(`Vestibule is at ${dk.vest.press.toFixed(1)} kPa — equalise to 100 kPa first.`);
     if (dk.vest.leakOk) return say('Leak check already passed.', 'sys');
-    dk.vest.valve = false; dk.vest.check = 0;
-    return say('LEAK CHECK RUNNING · valve closed, holding 60 s and watching for decay.', 'key');
+    dk.vest.valve = false; dk.vest.check = 0; dk.vest.decay = 0; dk.vest.verdict = null;
+    return say(`LEAK CHECK RUNNING · valve closed, holding ${LEAK_HOLD} s. Watch the decay: more than ${LEAK_LIMIT.toFixed(2)} kPa and the seal is rejected. You do not have to wait for the verdict if the trend is obvious.`, 'key');
   }
+  case 'RESEAT': {
+    if (dk.phase !== 'HARD') return no('Nothing to re-seat — the latches are not closed.');
+    if (dk.vest.hatch) return no('Close the hatch before breaking the seal.');
+    if (dk.pwr.umb || dk.prop.line) return no('Disconnect the umbilical and the transfer line before breaking the seal.');
+    // Back out to the ring and drive it home again. This vents the vestibule —
+    // breaking the latches opens it to vacuum — so pressurisation starts over.
+    dk.reseats++;
+    dk.phase = 'RETRACT'; dk.ring = 0; dk.latches = 0; dk.latching = false;
+    dk.misalign0 = 0; dk.misalign = 0;
+    dk.vest = { valve:false, press:0, check:-1, decay:0, leak:0, verdict:null, leakOk:false, hatch:false };
+    return say('INTERFACE RE-SEATING · latches released, vestibule vented to vacuum, ring driving home again. Close the latches when it is home, then equalise and re-check.', 'key');
+  }
+
   case 'HATCH': {
     if (dk.phase !== 'HARD') return no('Hard dock required.');
     if (dk.vest.hatch) { dk.vest.hatch = false; return say('HATCH CLOSED AND LOCKED.', 'key'); }
@@ -2466,7 +2520,7 @@ function cmdDock(A) {
     return say('TRANSFER RUNNING · 0.5 kg/s into the main tank, then RCS.', 'ok');
   }
 
-  default: return no('Usage: DOCK AUTO|RETRACT|LATCH|UNDOCK · EQUALISE|LEAK|HATCH · UMB|TIE · DUCT|FAN · LINE|XFER');
+  default: return no('Usage: DOCK AUTO|RETRACT|LATCH|RESEAT|UNDOCK · EQUALISE|LEAK|HATCH · UMB|TIE · DUCT|FAN · LINE|XFER');
   }
 }
 </script>
@@ -3271,17 +3325,31 @@ UTIL: { count: () => 4, title: () => 'UTILITIES',
 
     if (pg === 0) {
       const ve = dk.vest, p = ve.press;
+      const running = ve.check >= 0 && !ve.verdict;
+      // Project the run out to the full hold, so the trend is readable long
+      // before the verdict: a bad seal shows inside about fifteen seconds.
+      const proj = ve.check > 2 ? ve.decay * LEAK_HOLD / Math.max(ve.check, 1e-6) : null;
+      const status = ve.verdict === 'PASS' ? 'PASSED'
+                   : ve.verdict === 'FAIL' ? 'FAILED — RE-SEAT'
+                   : running ? `${ve.check.toFixed(0)} / ${LEAK_HOLD} s` : 'NOT RUN';
       return [
-        { l: F('Vestibule pressure', gauge(p/101.3) + ' ' + p.toFixed(1) + ' kPa', p >= 100 ? 'ok' : 'go'),
+        { l: F('Vestibule pressure', gauge(p/101.3) + ' ' + p.toFixed(2) + ' kPa', p >= 100 ? 'ok' : 'go'),
           r: F('Equalisation valve', ve.valve ? 'OPEN' : 'CLOSED', ve.valve ? 'go' : 'dim') },
-        { l: F('Leak check', ve.leakOk ? 'PASSED' : ve.check >= 0 ? `${ve.check.toFixed(0)} / 60 s  Δ 0.0 kPa` : 'NOT RUN',
-               ve.leakOk ? 'ok' : ve.check >= 0 ? 'go' : 'dim'),
+        { l: F('Leak check', status, ve.verdict === 'PASS' ? 'ok' : ve.verdict === 'FAIL' ? 'bad' : running ? 'go' : 'dim'),
           r: F('Hatch', ve.hatch ? 'OPEN' : 'CLOSED', ve.hatch ? 'ok' : 'dim') },
+        { l: F('Decay', (running || ve.verdict) ? `Δ ${ve.decay.toFixed(2)} kPa` : '——',
+               ve.decay > LEAK_LIMIT ? 'bad' : (running || ve.verdict) ? 'ok' : 'dim'),
+          r: F(`Projected · limit ${LEAK_LIMIT.toFixed(2)}`, proj != null ? proj.toFixed(2) + ' kPa' : '——',
+               proj == null ? 'dim' : proj > LEAK_LIMIT ? 'bad' : 'ok') },
         { l: K(ve.valve ? '<CLOSE VALVE*' : '<EQUALISE*', ve.hatch ? 'dim' : 'go', 'EQUALISE'),
           r: ve.leakOk ? F('', '', 'dim') : K('LEAK CHECK*', p >= 100 ? 'go' : 'dim', 'LEAK') },
         { l: K(ve.hatch ? '<CLOSE HATCH*' : '<OPEN HATCH*', ve.leakOk ? 'go' : 'dim', 'HATCH'),
-          r: F('Step', ve.hatch ? '3 of 3 COMPLETE' : ve.leakOk ? '3 of 3' : p >= 100 ? '2 of 3' : '1 of 3', ve.hatch ? 'ok' : '') },
-        { full: F('Procedure', 'Equalise to 101.3 kPa, close the valve and hold sixty seconds to prove the seal, then open the hatch. The vestibule starts at hard vacuum — the hatch will not unlock onto it.', 'body'), wrap: true },
+          r: K('RE-SEAT INTERFACE*', ve.leakOk ? 'dim' : 'go', 'RESEAT') },
+        { l: F('Step', ve.hatch ? '3 of 3 COMPLETE' : ve.leakOk ? '3 of 3' : p >= 100 ? '2 of 3' : '1 of 3', ve.hatch ? 'ok' : ''),
+          r: F('Re-seats', String(dk.reseats), dk.reseats ? 'go' : 'dim') },
+        { full: F('Procedure', ve.verdict === 'FAIL'
+            ? `That seal is leaking ${ve.decay.toFixed(2)} kPa a minute and running the check again will not change it. RE-SEAT drives the latches open and the ring home a second time, which vents the vestibule — you start from equalise.`
+            : `Equalise to 101.3 kPa, close the valve and hold ${LEAK_HOLD} s to prove the seal, then open the hatch. Watch the decay while it holds: more than ${LEAK_LIMIT.toFixed(2)} kPa and the seal is rejected, and you can call that long before the verdict.`, 'body'), wrap: true },
         foot,
       ];
     }
@@ -3507,7 +3575,7 @@ const HELP_PAGES = [
     ['WARP', 'WARP <rate>   or the rail arrows'],
     ['PLAN', 'PLAN CIRC AP · APO <km> · XFER <BODY>'],
     ['TRANS', 'TRANS TGT|AWAY|PORT|STBD <m/s>'],
-    ['DOCK', 'DOCK AUTO|RETRACT|LATCH|UNDOCK'],
+    ['DOCK', 'DOCK AUTO|RETRACT|LATCH|RESEAT|UNDOCK'],
     ['PAGES', 'Function keys below, or type the name.'],
   ] },
   { t: 'FLYING AN APPROACH', rows: [

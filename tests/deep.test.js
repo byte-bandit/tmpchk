@@ -143,10 +143,24 @@ if (t3 && V.len(t3.r) < 60) {
   ok('hard dock meets objective 3', S.objectives[2].done);
 
   // utilities, in order
-  exec('DOCK EQUALISE');
-  h=0; while(h++<4000 && S.dock.vest.press < 101) advance(1);
-  exec('DOCK LEAK');
-  h=0; while(h++<4000 && !S.dock.vest.leakOk) advance(1);
+  // The seal is rolled when the latches close and fails about one time in six
+  // after a clean capture, so the flight has to be able to recover from it —
+  // re-seat and run the check again, which is what a crew does.
+  let attempts = 0;
+  while (!S.dock.vest.leakOk && attempts++ < 8) {
+    exec('DOCK EQUALISE');
+    h=0; while(h++<4000 && S.dock.vest.press < 101) advance(1);
+    exec('DOCK LEAK');
+    h=0; while(h++<4000 && !S.dock.vest.verdict) advance(1);
+    if (S.dock.vest.verdict === 'FAIL') {
+      exec('DOCK RESEAT');
+      h=0; while(h++<4000 && S.dock.phase !== 'RETRACTED') advance(1);
+      exec('DOCK LATCH');
+      h=0; while(h++<4000 && S.dock.phase !== 'HARD') advance(1);
+    }
+  }
+  ok('the vestibule seals, re-seating the interface if it has to',
+     S.dock.vest.leakOk, `${attempts} leak check${attempts === 1 ? '' : 's'}, ${S.dock.reseats} re-seat(s)`);
   exec('DOCK HATCH');
   exec('DOCK UMB'); exec('DOCK TIE');
   exec('DOCK DUCT'); exec('DOCK FAN');

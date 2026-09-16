@@ -2,7 +2,7 @@ const { boot, suite } = require('./harness');
 const G = boot();
 const { exec, loadMission, advance, derive, V, targetRel, dockGeom, dockGuide,
         dockTarget, utilitiesDone, DOCK_ENV, PORT_ARM, PORT_ARM_STN,
-        fmtRange, fmtRate, rcsDV, craftMass, makeStation } = G;
+        fmtRange, fmtRate, rcsDV, craftMass, makeStation, LEAK_LIMIT, LEAK_HOLD } = G;
 const S = G.S;
 const out = G.lines;
 const T = suite('DOCKING');
@@ -164,11 +164,67 @@ exec('DOCK LEAK');
 ok('the leak check closes the equalisation valve', !S.dock.vest.valve);
 advance(20); exec('DOCK EQUALISE');
 ok('reopening the valve aborts the leak check', S.dock.vest.check < 0 && /ABORTED/.test(tail(1)), tail(1).slice(0, 60));
-exec('DOCK EQUALISE'); exec('DOCK LEAK');
-until(() => S.dock.vest.leakOk);
-ok('a clean 60 s hold passes', S.dock.vest.leakOk);
+
+/* ---- 6b. the leak check has a verdict worth waiting for ---- */
+// The seal is rolled when the latches close, so the tests set it directly:
+// the roll itself is checked statistically further down.
+S.dock.vest.leak = 0.62;                                  // kPa/min — a seal that did not seat
+exec('DOCK EQUALISE'); until(() => S.dock.vest.press >= 101.2);
+exec('DOCK LEAK');
+advance(8);
+const early = S.dock.vest.decay * 60 / S.dock.vest.check;
+ok('a bad seal is readable long before the verdict', early > LEAK_LIMIT * 2,
+   `projected ${early.toFixed(2)} kPa after 8 s, limit ${LEAK_LIMIT.toFixed(2)}`);
+until(() => S.dock.vest.verdict);
+ok('and it fails, with the numbers and the limit stated', S.dock.vest.verdict === 'FAIL' && !S.dock.vest.leakOk,
+   tail(1).slice(0, 72));
+ok('the vestibule really lost that pressure', S.dock.vest.press < 101.3 - LEAK_LIMIT,
+   S.dock.vest.press.toFixed(2) + ' kPa');
+exec('DOCK HATCH');
+ok('a failed check still keeps the hatch shut', !S.dock.vest.hatch, tail(1).slice(0, 45));
+// re-running the check on the same seal must fail again — the seal is the problem
+exec('DOCK EQUALISE'); until(() => S.dock.vest.press >= 101.2); exec('DOCK LEAK');
+until(() => S.dock.vest.verdict);
+ok('re-running the check on the same seal fails again', S.dock.vest.verdict === 'FAIL');
+// re-seating is the fix, and it costs a vented vestibule and a second latch drive
+const reseatAt = S.t;
+exec('DOCK RESEAT');
+ok('re-seating breaks the latches and vents the vestibule',
+   S.dock.phase === 'RETRACT' && S.dock.vest.press === 0 && S.dock.reseats === 1, S.dock.phase);
+until(() => S.dock.phase === 'RETRACTED');
+exec('DOCK LATCH'); until(() => S.dock.phase === 'HARD');
+ok('and the interface seats again', S.dock.phase === 'HARD' && S.dock.latches === 12,
+   `${((S.t - reseatAt)).toFixed(0)} s to re-seat`);
+ok('with a freshly rolled seal', S.dock.vest.leak !== 0.62, S.dock.vest.leak.toFixed(3) + ' kPa/min');
+S.dock.vest.leak = 0.04;                                  // a good one this time
+exec('DOCK EQUALISE'); until(() => S.dock.vest.press >= 101.2); exec('DOCK LEAK');
+until(() => S.dock.vest.verdict);
+ok('a good seal passes, with its margin stated', S.dock.vest.verdict === 'PASS' && S.dock.vest.leakOk,
+   tail(1).slice(0, 62));
 exec('DOCK HATCH');
 ok('now the hatch opens', S.dock.vest.hatch);
+ok('a failed seal is never a dead end', S.dock.phase === 'HARD' && S.status === 'flight');
+
+// the stated failure rate: 1 in 6 after a clean capture, 1 in 2 at the 10° limit
+{
+  const sample = (mis) => { let f = 0; for (let i = 0; i < 4000; i++) {
+    S.dock.misalign0 = mis; S.dock.phase = 'LATCHING'; S.dock.latches = 11.9;
+    S.dock.vest.leak = 0; advance(1);
+    if (S.dock.vest.leak * 1 > LEAK_LIMIT) f++;
+    S.dock.phase = 'HARD';
+  } return f / 4000; };
+  const clean = sample(0), sloppy = sample(10);
+  ok('a clean capture seats badly about 1 time in 6', clean > 0.12 && clean < 0.22,
+     `${(clean*100).toFixed(1)}% over ${4000} seatings`);
+  ok('a capture at the alignment limit seats badly about 1 time in 2', sloppy > 0.42 && sloppy < 0.58,
+     `${(sloppy*100).toFixed(1)}%`);
+  ok('so how well you fly the approach decides how much work follows it', sloppy > clean * 2,
+     `${(clean*100).toFixed(0)}% vs ${(sloppy*100).toFixed(0)}%`);
+}
+// leave it hard docked with an open hatch for the sections that follow
+S.dock.phase = 'HARD'; S.dock.latches = 12; S.dock.misalign = 0;
+S.dock.vest.leak = 0.04; S.dock.vest.leakOk = true; S.dock.vest.verdict = 'PASS';
+S.dock.vest.press = 101.3; S.dock.vest.hatch = true;
 
 /* ---------- 7. the power tie has to be worth pressing ---------- */
 console.log('\nPOWER TIE');
@@ -240,7 +296,11 @@ console.log('\nAUTO DOCK');
 loadMission(3); exec('WARP 1'); place({ axial: 25, lateral: 4, closing: 0 });
 exec('DOCK AUTO');
 ok('M-03 does not offer auto dock — the skill is learned by hand once',
-   !S.dock.auto && /inhibited/.test(tail(1)), tail(1).slice(0, 60));
+   !S.dock.auto && /not fitted to this vehicle/.test(tail(1)), tail(1).slice(0, 60));
+G.gotoPage('DOCK'); G.renderCDU();
+const autoFld = G.CURRENT.map(r => [r.l, r.r].map(f => f ? f.lab + ' ' + f.val : '').join(' ')).join(' ');
+ok('and the page says the same thing the command does', /Auto dock NOT FITTED/.test(autoFld),
+   (autoFld.match(/Auto dock [A-Z ]+/) || ['none'])[0]);
 
 loadMission(0); exec('WARP 1'); exec('TGT STATION');
 ok('free flight has a station to dock with', !!dockTarget());

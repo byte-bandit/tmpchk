@@ -98,7 +98,10 @@ quality, and one sub-object per utility group.
 5. **M-03 grew from two objectives to four**: inside 30 km → soft capture →
    hard dock → utilities connected.
 6. **AUTO DOCK exists but M-03 does not offer it.** The skill is learned by
-   hand once; free flight and later missions get the key.
+   hand once; free flight and later missions get the key. The fiction is that
+   AURIGA-3 does not carry the equipment, not that a key is disabled — M-03's
+   briefing, the DOCK page (`NOT FITTED`) and the `DOCK AUTO` command all say
+   the same thing. Keep them in step if any of them changes.
 
 ### The single alignment angle
 
@@ -137,6 +140,52 @@ issue. `dockAutoStep` applies them for AUTO DOCK, the DOCK page prints them as
 the flight director for a hand-flying player, and `deep.test.js` drives the
 same function step by step — so M-03 can withhold the AUTO key without the test
 needing a second controller that would drift out of step with the real one.
+
+### The vestibule seal — a deliberate failure rate
+
+The leak check was originally a 60 s timer with a flat `Δ 0.0 kPa` reading: the
+one step in the whole sequence where the player waited rather than did
+anything. The owner's fix was to give it something to find.
+
+**The seal is decided when the LATCHES CLOSE, not when the check is run.** A
+vestibule that leaks is one that seated badly, so re-running the check on the
+same seal fails again — and the message says so. The only fix is to re-seat.
+
+**Failure rate — this is design, not a bug.** `rollSeal()` in script 2:
+
+| Capture quality | Chance the seal fails |
+|---|---|
+| Clean (0° misalignment) | **1 in 6** (16.7%) |
+| 5° off axis | 1 in 3 (33%) |
+| At the 10° limit | **1 in 2** (50%) |
+
+`risk = min(0.5, 1/6 + misalignAtCapture × 0.033)`, tested statistically over
+4000 seatings at both ends. This is the one place where how well you flew the
+approach decides how much work follows it — a sloppy capture is not just slower
+to straighten, it seats badly half the time.
+
+A failing seal leaks 0.30–1.20 kPa/min; a passing one 0.005–0.105. The limit is
+**0.20 kPa lost over the 60 s hold**. The two bands do not overlap, deliberately.
+
+**The 60 s was kept, not shortened.** The page now shows live decay and a
+projection to the full hold, so a bad seal reads 0.62 kPa against a 0.20 limit
+**within about eight seconds**. The wait is now optional: an attentive crew
+calls it early and re-seats, an inattentive one waits out the minute. That is
+the reward for watching, and it is why the hold did not need cutting.
+
+**`RE-SEAT INTERFACE*`** releases the latches, extends the ring and drives it
+home again, which vents the vestibule to vacuum — so pressurisation starts
+over. About 44 s to re-seat plus 90 s to re-equalise, roughly three minutes a
+retry. Two forced failures cost an M-03 flight 6.5 minutes of mission time. It
+is always recoverable, consistent with the owner's answer on failure: nothing
+in docking is ever a dead end.
+
+Randomness and tests: `Math.random()` is the right model for a chance event, so
+suites that need a specific outcome set `S.dock.vest.leak` directly, and the
+roll itself is checked statistically. `deep.test.js` does neither — it flies
+M-03 for real and **loops on failure, re-seating and re-checking up to eight
+times**, which is how a crew would handle it and proves recoverability on a
+real flight rather than in isolation.
 
 ### Pitfalls found — worth knowing before touching this again
 
@@ -208,7 +257,9 @@ needing a second controller that would drift out of step with the real one.
 - `UTIL` — reached by a link from DOCK, not a thirteenth function key (a test
   asserts there are exactly twelve). Four sub-pages:
   - **VESTIBULE**: `EQUALISE*` (101.3 kPa over 90 s, on a gauge) → `LEAK CHECK*`
-    (valve shut, 60 s hold; reopening the valve aborts it) → `OPEN HATCH*`.
+    (valve shut, 60 s hold, live decay and projection against a stated limit) →
+    `OPEN HATCH*`, with `RE-SEAT INTERFACE*` as the way out of a failed seal.
+    See "The vestibule seal" below.
   - **ELECTRICAL**: `MATE UMBILICAL*` → `CLOSE BUS TIE*`. 2000 W from the
     station, data link up, and your battery stops draining and starts charging.
   - **ECLSS**: `INSTALL DUCT*` (needs the hatch open) → `START FAN*`. Your own
@@ -230,7 +281,11 @@ too much lateral rate, and a fly-past; crooked capture carries its
 misalignment, the latches refuse, retraction straightens it and costs more time
 than a clean one; mated the vehicle is carried round the orbit and both
 engine and RCS are inhibited; every utility refuses out of order; pressurisation
-takes clock time and the leak check can be aborted; the power tie stops battery
+takes clock time, the leak check can be aborted, a bad seal is readable within
+eight seconds and fails with its numbers stated, re-running it on the same seal
+fails again, re-seating vents the vestibule and rolls a new seal, and the roll
+rate is checked statistically over 4000 seatings at both 0° and 10°; the power
+tie stops battery
 drain *in eclipse* and charges instead; the fan stops O₂ drain; the transfer
 refuses without the bus, fills both tanks, and tells a full vehicle there is
 nothing to move; undocking; an empty RCS tank drifts rather than dying; AUTO
@@ -258,10 +313,11 @@ Measured on the M-03 flight: **8.4 min, 0 bounces, 4.3 m/s of RCS spent of the
   procedure and no corridor-clearing objective. Fine for now.
 - **The station is a point with a port.** It has no structure to collide with
   other than the 1.0 m ring, no mass, and only one port.
-- **The leak check's 60 s hold is the one step that is a timer rather than a
-  procedure** — Δ reads 0.0 kPa throughout and the only interaction is the
-  abort. Flagged to the owner rather than silently simplified. The `INSTALL
-  DUCT*` step is the next thinnest: its only consequence is enabling the fan.
+- **`INSTALL DUCT*` is the thinnest remaining step**: its only consequence is
+  enabling the fan on the next keypress, so ECLSS reads as one action split in
+  two. Raised with the owner and left alone deliberately — it keeps ECLSS the
+  same shape as the other three. (The leak check had the same complaint and was
+  fixed; see "The vestibule seal".)
 - **`INRT` is still unused**, waiting for the launch item's pitch schedule.
 
 ---

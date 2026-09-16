@@ -64,6 +64,7 @@ function boot(file = GAME) {
   dockGeom, dockGuide, dockTarget, rcsPulse, utilitiesDone, DOCK_ENV,
   inProxOps, fmtRange, fmtRate, commandedTheta, attError, makeStation,
   PORT_ARM, PORT_ARM_STN, dockLeg, stepDock, DOCK_HOLD, DOCK_STAND,
+  LEAK_LIMIT, LEAK_HOLD, rollSeal,
   get S(){ return S; }, get D(){ return D; },
   get CURRENT(){ return CURRENT; }, get spMessage(){ return spMessage; },
 };`);
