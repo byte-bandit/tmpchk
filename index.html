@@ -539,6 +539,9 @@ const S = {
   flags: { lunarSOI:false, perihelionPassed:false },
   landingAllowed: false, thermLimit: 800, completed: false, pauseAfterBurn: false,
   solution: null, planName: '', planDetail: '', burnSel: { dir:'PRO', at:'AP', dur:0 },
+  // Attitude is real state now: a planar sim, so one angle plus its rate.
+  // `mode` is what the autopilot is chasing; `theta` is where the nose is.
+  att: { theta: 0, rate: 0, mode: 'PRO', inertial: 0, slewing: false },
 };
 
 const craftMass = () => S.craft.dry + S.craft.fuel + S.craft.rcs;
@@ -573,6 +576,7 @@ function derive() {
   if (S.loads.COMM) load += 80;
   if (S.loads.SCI)  load += 210;
   if (S.burn) load += 60;
+  if (S.att.slewing) load += S.craft.slewPower || 90;   // reaction wheels
   S.power.gen = gen; S.power.load = load;
 
   const earth = absState('EARTH', S.t).r;
@@ -599,22 +603,107 @@ function stepSystems(dt) {
 }
 
 /* ---- thrust ------------------------------------------------ */
-function thrustDir(mode) {
-  const vhat = V.unit(S.v), rhat = V.unit(S.r);
-  switch (mode) {
-    case 'PRO':  return vhat;
-    case 'RET':  return V.mul(vhat, -1);
-    case 'ROUT': return rhat;
-    case 'RIN':  return V.mul(rhat, -1);
-    default:     return vhat;
+/* ---- attitude ------------------------------------------------------------
+   The vehicle no longer points wherever the trajectory says. `mode` names a
+   reference the autopilot chases; the nose slews toward it at a finite rate and
+   spends RCS propellant doing so. Thrust comes out of the nose, so a burn that
+   is commanded before the vehicle has turned simply waits.            */
+
+/** The inertial heading `mode` currently asks for, in radians. */
+function commandedTheta(mode) {
+  const m = mode || S.att.mode;
+  const ang = (v) => Math.atan2(v.y, v.x);
+  switch (m) {
+    case 'PRO':  return ang(S.v);
+    case 'RET':  return ang(S.v) + Math.PI;
+    case 'ROUT': return ang(S.r);
+    case 'RIN':  return ang(S.r) + Math.PI;
+    case 'TGT':  { const t = targetRel(); return t ? ang(t.r) : S.att.theta; }
+    case 'ATGT': { const t = targetRel(); return t ? ang(t.r) + Math.PI : S.att.theta; }
+    case 'INRT': return S.att.inertial;
+    case 'FREE': return S.att.theta;
+    default:     return ang(S.v);
   }
+}
+/** Signed shortest angle from a to b, in (-π, π]. */
+function angDiff(a, b) { let d = (b - a) % TAU; if (d > Math.PI) d -= TAU; if (d <= -Math.PI) d += TAU; return d; }
+/** Pointing error against the commanded attitude, radians. */
+const attError = () => Math.abs(angDiff(S.att.theta, commandedTheta()));
+const ALIGN_TOL = 0.5 * Math.PI/180;      // 0.5° counts as pointed
+
+/** Seconds to slew `ang` radians from rest under a trapezoidal rate profile. */
+function slewTime(ang, maxRate, accel) {
+  ang = Math.abs(ang);
+  const dAcc = maxRate * maxRate / (2 * accel);
+  return ang <= 2 * dAcc ? 2 * Math.sqrt(ang / accel)
+                         : 2 * (maxRate / accel) + (ang - 2 * dAcc) / maxRate;
+}
+
+/** Slew the vehicle toward its commanded attitude, charging RCS for the turn.
+ *
+ *  Note the sub-stepping. advance() hands this the Kepler chunk, which is
+ *  deliberately coarse while coasting — hundreds of seconds. Integrating a
+ *  bang-bang controller at that step diverges rather than converges, so when
+ *  the whole slew fits inside the chunk it is settled analytically, and only a
+ *  slew that outlasts the chunk is integrated. */
+function stepAttitude(dt) {
+  const a = S.att, c = S.craft;
+  if (a.mode === 'FREE' || dt <= 0) { a.rate = 0; a.slewing = false; return; }
+  const maxRate = c.slewRate || 4*Math.PI/180;
+  const accel   = c.slewAccel || 2*Math.PI/180;
+  // Turning is done on reaction wheels, which draw power rather than mass.
+  // This is both what real spacecraft do and the only version that leaves the
+  // vehicle's mass untouched: spending even 0.25 kg of propellant to turn
+  // changes the injection by ~0.05 m/s, which over a 259-day transfer to Mars
+  // is a 550,000 km miss.
+  if (S.power.batt <= 0 && D.gen < D.load) { a.rate = 0; a.slewing = false; return; }
+
+  const err0 = angDiff(a.theta, commandedTheta());
+  const need = slewTime(err0, maxRate, accel) + Math.abs(a.rate) / accel;
+  if (dt >= need) {                                    // settles within this chunk
+    a.slewing = Math.abs(err0) > ALIGN_TOL;
+    a.theta = commandedTheta();
+    a.rate = 0;
+    return;
+  }
+  a.slewing = true;
+  const h = Math.min(0.25, dt);
+  for (let t = 0; t < dt - 1e-9; t += h) {
+    const step = Math.min(h, dt - t);
+    const err = angDiff(a.theta, commandedTheta());
+    const brake = (a.rate * a.rate) / (2 * accel);
+    const want = Math.abs(err) <= brake ? 0
+      : Math.sign(err) * Math.min(maxRate, Math.sqrt(2 * accel * Math.abs(err)));
+    const dvr = want - a.rate;
+    a.rate += Math.sign(dvr) * Math.min(Math.abs(dvr), accel * step);
+    a.theta = normAngle(a.theta + a.rate * step);
+  }
+  // Snap once inside tolerance so thrust is exactly along the commanded
+  // reference: a tracking lag would quietly shift every tested trajectory.
+  if (Math.abs(angDiff(a.theta, commandedTheta())) < ALIGN_TOL) {
+    a.theta = commandedTheta(); a.rate = 0; a.slewing = false;
+  }
+}
+
+/** Thrust comes out of the nose. */
+function thrustDir() {
+  return { x: Math.cos(S.att.theta), y: Math.sin(S.att.theta) };
+}
+/** Point the vehicle, without lighting anything. */
+function setAttMode(mode, inertial) {
+  S.att.mode = mode;
+  if (mode === 'INRT' && inertial != null) S.att.inertial = inertial;
 }
 
 /** Numerically integrate one substep while the main engine is lit. */
 function burnStep(dt) {
   const b = soiBody(), mu = b.mu;
   const m = craftMass();
-  const dirv = thrustDir(S.burn.dir);
+  // An engine does not fire until the vehicle is pointed. The burn clock stops
+  // while it turns, so a commanded duration is always a duration of thrust.
+  if (attError() > ALIGN_TOL) { S.aligning = true; return; }
+  S.aligning = false;
+  const dirv = thrustDir();
   const aT = S.craft.fuel > 0 ? S.craft.thrust / m : 0;   // km/s^2
   const acc = (rv) => {
     const rr = V.len(rv);
@@ -714,6 +803,11 @@ function advance(dtSim) {
       if (isFinite(ti) && ti > 0) cap = Math.min(cap, Math.max(0.25, ti));
       dt = Math.min(left, cap);
     }
+    // Point before thrusting. Running the slew after the burn step would make
+    // the engine use the previous step's attitude, and the solver — which
+    // assumes the vehicle is pointed — would no longer predict the flight. Over
+    // an 800 s injection that lag is enough to miss a sphere of influence.
+    stepAttitude(dt);
     if (S.burn) burnStep(dt); else {
       const b = soiBody();
       const out = propagate(S.r, S.v, b.mu, dt);
@@ -966,13 +1060,21 @@ function draw() {
   disc(pe, 2.5, '#F2A33C', null); tag(pe, 'PE', '#9A6A2A', -6);
 
   // vehicle
-  const vhat = V.unit(S.v);
   const CX = W/2 + PX(S.r.x), CY = H/2 - PX(S.r.y);
-  cx2.save(); cx2.translate(CX, CY); cx2.rotate(-Math.atan2(vhat.y, vhat.x));
-  if (S.burn) {
+  // a tick showing where the autopilot is asking the nose to go, while it turns
+  if (S.att.slewing) {
+    const cmd = commandedTheta();
+    cx2.save(); cx2.translate(CX, CY); cx2.rotate(-cmd);
+    cx2.beginPath(); cx2.moveTo(9,0); cx2.lineTo(15,0);
+    cx2.strokeStyle = '#3FA9C9'; cx2.lineWidth = 1.2; cx2.stroke();
+    cx2.restore();
+  }
+  cx2.save(); cx2.translate(CX, CY); cx2.rotate(-S.att.theta);
+  if (S.burn && !S.aligning) {
+    // thrust leaves the back of the nose, wherever the nose is pointing
     cx2.beginPath(); cx2.moveTo(-5,0);
-    const fl = 9 + Math.random()*5, sgn = (S.burn.dir==='RET') ? 1 : -1;
-    cx2.lineTo(sgn*fl, -2.6); cx2.lineTo(sgn*fl, 2.6); cx2.closePath();
+    const fl = 9 + Math.random()*5;
+    cx2.lineTo(-fl, -2.6); cx2.lineTo(-fl, 2.6); cx2.closePath();
     cx2.fillStyle = '#F2A33Ccc'; cx2.fill();
   }
   cx2.beginPath(); cx2.moveTo(6,0); cx2.lineTo(-4,-3.6); cx2.lineTo(-4,3.6); cx2.closePath();
@@ -1130,6 +1232,7 @@ function updateHUD() {
   if (S.status === 'lost')      { txt = 'VEHICLE LOST'; cls = 'crit'; }
   else if (S.completed)         { txt = 'OBJECTIVES MET'; cls = 'ok'; }
   else if (S.status === 'landed')   { txt = 'LANDED'; cls = 'ok'; }
+  else if (S.aligning)          { txt = 'ALIGNING'; cls = 'caution'; }
   else if (S.burn)              { txt = 'ENGINE ' + S.burn.dir; cls = 'caution'; }
   else if (S.power.batt <= 0.1) { txt = 'BUS UNDERVOLT'; cls = 'crit'; }
   else if (d.perAlt < 0)        { txt = 'IMPACT TRAJ'; cls = 'crit'; }
@@ -1153,6 +1256,8 @@ const DIRS = {
   RIN:'RIN', RADIN:'RIN', IN:'RIN', DOWN:'RIN',
 };
 const DIRNAME = { PRO:'prograde', RET:'retrograde', ROUT:'radial out', RIN:'radial in' };
+const ATTNAME = { PRO:'PROGRADE', RET:'RETROGRADE', ROUT:'RADIAL OUT', RIN:'RADIAL IN',
+                  TGT:'TARGET', ATGT:'ANTI-TARGET', INRT:'INERTIAL', FREE:'FREE DRIFT' };
 
 function startBurn(dir, dur, scheduled) {
   if (S.status !== 'flight') return say('Vehicle is not in flight.', 'err');
@@ -1160,6 +1265,7 @@ function startBurn(dir, dur, scheduled) {
   if (S.burn) return say('Engine already lit. CANCEL first.', 'err');
   S.preBurnWarp = S.warp;
   if (S.warp > 10) S.warp = 10;
+  setAttMode(dir);
   S.burn = { dir, left:dur, total:dur };
   const est = burnDV(dur);
   say(`IGNITION · ${DIRNAME[dir]} for {${dur.toFixed(1)} s}  ≈ {${fmtDV(est)}}`
@@ -1211,7 +1317,7 @@ function exec(raw) {
     if (atIx >= 0) {
       const w = A[atIx+1] || '';
       if (w === 'PE' || w === 'AP') {
-        S.sched = { dir, dur, at:w };
+        S.sched = { dir, dur, at:w }; setAttMode(dir);
         const tt = w === 'PE' ? D.tPeri : D.tApo;
         return say(`BURN ARMED · ${DIRNAME[dir]} ${dur.toFixed(1)} s at ${w === 'PE' ? 'periapsis' : 'apoapsis'}, T−{${fmtT(tt)}}. Ignition starts {${(dur/2).toFixed(1)} s} early to centre the burn.`, 'key');
       }
@@ -1219,12 +1325,12 @@ function exec(raw) {
         const tk = A[atIx+2];
         if (!tk || !BODIES[tk]) return say('Usage: BURN <DIR> <SEC> AT XFER <BODY>', 'err');
         if (BODIES[tk].parent !== S.soi) return say(`${tk} does not orbit ${soiBody().name}.`, 'err');
-        S.sched = { dir, dur, at:'XFER', body:tk };
+        S.sched = { dir, dur, at:'XFER', body:tk }; setAttMode(dir);
         const win = transferWindow(tk);
         return say(`BURN ARMED · ${DIRNAME[dir]} ${dur.toFixed(1)} s at the ${tk} transfer window, T−{${fmtT(win.wait)}}. Wind the clock up — the console will hold the node.`, 'key');
       }
       const m = w.match(/^T\+?(\d+(\.\d+)?)$/);
-      if (m) { S.sched = { dir, dur, at:'T', when:S.t + parseFloat(m[1]) };
+      if (m) { S.sched = { dir, dur, at:'T', when:S.t + parseFloat(m[1]) }; setAttMode(dir);
         return say(`BURN ARMED · ${DIRNAME[dir]} ${dur.toFixed(1)} s in {${fmtT(parseFloat(m[1]))}}.`, 'key'); }
       return say('AT takes PE, AP, or T+<seconds>.', 'err');
     }
@@ -1237,11 +1343,12 @@ function exec(raw) {
     return say('Nothing to cancel.', 'sys');
   }
 
-  case 'HOLD': {
-    const dir = DIRS[A[0]];
-    if (!dir) return say('Usage: HOLD <PRO|RET|RIN|ROUT>', 'err');
-    S.att = dir;
-    return say(`Attitude hold: ${DIRNAME[dir]}.`, 'sys');
+  case 'HOLD': case 'ATT': {
+    const extra = { TGT:'TGT', TARGET:'TGT', ATGT:'ATGT', FREE:'FREE', INRT:'INRT' };
+    const dir = DIRS[A[0]] || extra[A[0]];
+    if (!dir) return say('Usage: HOLD <PRO|RET|RIN|ROUT|TGT|ATGT|FREE>', 'err');
+    setAttMode(dir);
+    return say(`ATTITUDE HOLD · ${ATTNAME[dir]}`, 'sys');
   }
 
   case 'WARP': case 'W': {
@@ -1828,7 +1935,10 @@ function makeStation(soi, altKm, phaseDeg) {
 }
 function rig(o) {
   Object.assign(S.craft, { name:'—', dry:2200, fuel:0, fuelMax:0, thrust:30, isp:311,
-                           rcs:0, rcsMax:0, rcsIsp:220, crew:0, o2:0 }, o);
+                           rcs:0, rcsMax:0, rcsIsp:220, crew:0, o2:0,
+                           slewRate: 4 * Math.PI/180,      // rad/s maximum
+                           slewAccel: 2 * Math.PI/180,     // rad/s^2
+                           slewPower: 90 }, o);            // W drawn by the wheels while turning
   S.craft.fuelMax = o.fuel; S.craft.rcsMax = o.rcs || 0;
 }
 
@@ -1996,7 +2106,9 @@ function loadMission(id) {
   const m = MISSIONS.find(x => x.id === id);
   if (!m) return say('No such mission.', 'err');
   S.t = 0; S.warp = 0; S.burn = null; S.sched = null; S.objects = [];
-  S.target = null; S.status = 'flight'; S.att = 'PRO';
+  S.target = null; S.status = 'flight';
+  S.att = { theta: 0, rate: 0, mode: 'PRO', inertial: 0, slewing: false };
+  S.aligning = false;
   S.completed = false; S.pauseAfterBurn = false;
   S.solution = null; S.burnSel = { dir:'PRO', at:'AP', dur:0 };
   S.landingAllowed = false; S.thermLimit = 800;
@@ -2005,6 +2117,7 @@ function loadMission(id) {
   S.flags = { lunarSOI:false, perihelionPassed:false };
   S.warnedPower = S.warnedTherm = S.warnedAtmo = false;
   m.setup();
+  S.att.theta = commandedTheta('PRO');   // vehicles start pointed prograde
   S.mission = m;
   S.objectives = m.obj.map(o => ({ ...o, done:false }));
   derive(); fitView();
@@ -2380,6 +2493,9 @@ ORB: { count: () => 2, title: (i) => i ? 'ORBIT' : 'ORBIT',
       r: F('True anomaly', (D.e.nu*180/Math.PI).toFixed(1) + '°') },
     { l: F('V-circular', fmtVel(vCirc(soiBody().mu, D.e.r))), r: F('V-escape', fmtVel(Math.sqrt(2*soiBody().mu/D.e.r))) },
     { l: F('Vertical rate', fmtVel(D.e.vr)), r: F('Direction', D.e.dir > 0 ? 'PROGRADE' : 'RETROGRADE') },
+    { l: F('Attitude hold', ATTNAME[S.att.mode] || S.att.mode, 'ok'),
+      r: F('Pointing error', (attError()*180/Math.PI).toFixed(2) + '°' + (S.att.slewing ? '  SLEWING' : ''),
+           S.att.slewing ? 'go' : 'ok') },
     { l: F('SOI radius', isFinite(soiBody().soi) ? fmtDist(soiBody().soi) : '——'),
       r: F('Ang momentum', Math.abs(D.e.h).toFixed(0)) },
     menuRow('PLAN>', 'PLAN'),
@@ -2438,8 +2554,13 @@ BURN: Object.assign(one('BURN'), {
       { l: F('Duration  s ⇦ scratchpad', sel.dur ? sel.dur.toFixed(1) + ' s' : '□□□', sel.dur ? 'sel' : 'go',
             () => { const n = numFromScratch('BURN DURATION, SECONDS'); if (n != null && n > 0) sel.dur = n; }),
         r: F('ΔV this burn', prev) },
-      { l: F('Engine', S.burn ? DIRNAME[S.burn.dir].toUpperCase() + ' ' + S.burn.left.toFixed(1) + ' s' : 'OFF',
-            S.burn ? 'go' : 'dim'),
+      { l: F('Attitude', ATTNAME[S.att.mode] || S.att.mode, 'sel',
+            cycle(['PRO','RET','RIN','ROUT','TGT','ATGT','FREE'], S.att.mode, (v) => setAttMode(v))),
+        r: F('Pointing error', (attError()*180/Math.PI).toFixed(2) + '°',
+             attError() > ALIGN_TOL ? 'go' : 'ok') },
+      { l: F('Engine', S.aligning ? 'WAITING ON ATTITUDE'
+                     : S.burn ? DIRNAME[S.burn.dir].toUpperCase() + ' ' + S.burn.left.toFixed(1) + ' s' : 'OFF',
+            S.aligning ? 'go' : S.burn ? 'go' : 'dim'),
         r: F('ΔV remaining', dv(), 'ok') },
       { l: F('Armed', S.sched ? `${DIRNAME[S.sched.dir]} ${S.sched.dur.toFixed(1)} s` : 'NONE', S.sched ? 'go' : 'dim'),
         r: F('Time to ignition', S.sched ? fmtT(timeToIgnition()) : '——', S.sched ? 'go' : 'dim') },

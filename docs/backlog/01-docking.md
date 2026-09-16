@@ -1,99 +1,67 @@
 # 01 — Realistic docking and berthing
 
-**Status:** not started
+**Status:** phase 0 done, docking mechanics next
 **Contains:** the attitude model (phase 0 below) — an approach without alignment is not a docking
 
 
-## Phase 0 — attitude (scoped to what docking needs)
+## Phase 0 — attitude — **DONE**
 
-Decided: attitude is built here rather than as a separate item, scoped to
-docking's needs, and extended later when launch needs a pitch program. Build
-only what alignment requires; resist generalising ahead of the launch item.
+`S.att = { theta, rate, mode, inertial, slewing }`. The nose is real state; the
+autopilot chases `mode` at a finite rate; thrust leaves the nose. Modes: PRO,
+RET, RIN, ROUT, TGT, ATGT, INRT, FREE. `HOLD <mode>` commands it, the ORB and
+BURN pages show it, and the scope marker points where the nose does with a cyan
+tick for the commanded heading while slewing.
 
-### The problem
+### Decisions taken
 
-There is no attitude state in the simulation. The vehicle is a point mass. What
-looks like pointing is actually a direction *derived* from the trajectory:
+1. **Turning costs power, not propellant** — reaction wheels, `slewPower` 90 W
+   while turning, drawn through the existing electrical model. This was forced
+   by a measurement, not a preference: see the pitfall below. A dead bus means
+   no attitude control, which is a real and interesting failure mode.
+2. **Slew rate** 4°/s with 2°/s² acceleration, per vehicle. A 180° reversal
+   takes ~47 s.
+3. **Ignition waits for alignment.** `burnStep` returns without thrusting while
+   pointing error exceeds 0.5°, and the burn clock does not run — so a commanded
+   duration is always a duration of thrust. Arming a burn commands the attitude
+   immediately, so the slew finishes during the lead-in and ignition timing is
+   unchanged.
+4. **Attitude is shown on the scope**, including the commanded heading.
 
-```js
-function thrustDir(mode) {
-  const vhat = V.unit(S.v), rhat = V.unit(S.r);
-  switch (mode) {
-    case 'PRO':  return vhat;            // along velocity
-    case 'RET':  return V.mul(vhat, -1);
-    case 'ROUT': return rhat;            // away from the primary
-    case 'RIN':  return V.mul(rhat, -1);
-  }
-}
-```
+### Pitfalls found — worth knowing before touching this again
 
-`S.att` exists and is set by `HOLD`, but nothing reads it — thrust direction
-comes straight from `S.burn.dir`. So the vehicle can change "orientation"
-instantly and for free, and cannot be pointed anywhere that is not one of those
-four trajectory-relative directions.
-
-That is fine for the orbital mechanics the game has now. It blocks:
-
-- **Docking** — alignment with a port, roll to match a target, approach along a
-  port axis rather than a line of sight.
-- **Launch** — a pitch program is *by definition* a commanded attitude that
-  differs from prograde.
-- **Landing** — currently flown on a retrograde hold, which works but is a
-  coincidence of the geometry rather than a choice.
-
-### What to build
-
-Planar, so attitude is one number: a heading angle θ in the same inertial frame
-as `S.r` / `S.v`. Suggested state:
-
-```js
-S.att = {
-  theta: 0,        // rad, inertial heading the nose points
-  rate: 0,         // rad/s
-  mode: 'PRO',     // PRO | RET | RIN | ROUT | HOLD | TGT | ANTI-TGT | INERTIAL
-  target: null,    // commanded theta when mode is INERTIAL
-};
-```
-
-Then:
-- An autopilot slews toward the commanded attitude at a finite rate, with a
-  maximum rate and acceleration set by the vehicle's RCS authority.
-- `thrustDir()` returns the *attitude* vector, not a trajectory-derived one.
-- Existing modes keep working by continuously recomputing the commanded θ.
-
-### Attitude open questions
-
-1. **Does attitude cost RCS propellant?** Realistic (and makes a sloppy docking
-   approach expensive), but adds a failure mode where you cannot turn. Suggest:
-   yes, but cheap, with a separate small budget.
-2. **How fast should it slew?** A real spacecraft takes 30-90 s for a large
-   reorientation. At 10× warp during a burn that is invisible; at 1× during
-   docking it is the whole game. Suggest a per-vehicle `slewRate` around
-   2-5 °/s.
-3. **Do existing burns need to wait for attitude?** If a burn commands PRO and
-   the vehicle is pointing anti-normal, does ignition wait for the slew? Real
-   answer: yes. Risk: every armed burn in the existing nine missions now has a
-   settling time, which shifts the tested ignition points. Suggest arming
-   triggers the slew early so ignition timing is unchanged.
-4. **Is attitude shown on the scope?** The craft marker currently points along
-   velocity. Making it show real attitude is a small renderer change and a large
-   readability win.
-
-### Attitude risk
-
-Question 3 is the one that can break things. Nine missions and three suites
-depend on burns igniting at a precise time — `deep.test.js` asserts a lunar
-arrival periapsis that moves ~20,000 km per second of ignition error. Any
-attitude settling that delays ignition must be accounted for in the solver, not
-bolted on afterwards.
-
+- **Do not integrate attitude at the Kepler chunk size.** `advance()` hands out
+  chunks of up to hundreds of seconds while coasting. A bang-bang controller at
+  that step diverges instead of converging — the first version pinned the rate
+  at maximum forever and drained the tanks. `stepAttitude` now settles
+  analytically when the whole slew fits inside the chunk, and only sub-steps
+  (0.25 s) when it does not.
+- **Attitude must be updated before thrust, not after.** Running the slew after
+  `burnStep` makes the engine use the previous step's pointing, and the solver —
+  which assumes the vehicle is pointed — stops predicting the flight. Over an
+  800 s Mars injection that lag missed the sphere of influence entirely.
+- **Anything that changes vehicle mass changes tested trajectories.** Charging
+  0.25 kg of RCS for the slew shifted the Mars injection by 0.047 m/s, and over
+  a 259-day transfer that became a **550,000 km miss**. The sensitivity is real
+  physics, so the fix was to stop changing the mass. Any future feature that
+  touches `craftMass()` during flight must be checked against `deep.test.js`.
+- The nose snaps exactly onto the commanded reference once inside tolerance.
+  That is deliberate: a tracking lag of even a hundredth of a degree during a
+  long burn would quietly move every arrival.
 
 ### Carry-over for the launch item
 
-Launch needs commanded attitude that is independent of both the trajectory and
-any target — a pitch program is a schedule of absolute attitudes. If the
-`INERTIAL` mode above is built now, launch inherits it for free. If it is cut to
-save time, note that here so the launch item knows it is owed.
+`INRT` (inertial hold) exists and is wired but unused — a pitch program is a
+schedule of `INRT` headings, so launch inherits it. What launch still needs:
+a pitch *schedule* (altitude/heading pairs) and a guidance loop to fly it.
+
+### Coverage
+
+`tests/attitude.test.js`: starts pointed, holds a rotating reference, a
+reversal takes real time and respects the rate limit, a slew spends no
+propellant but draws wheel power and stops when settled, ignition waits on
+attitude and burns its full duration afterwards, arming commands attitude
+immediately and M-01 still lands within a kilometre of its pre-attitude result,
+HOLD TGT points at the target, and a dead bus means no attitude control.
 
 ---
 

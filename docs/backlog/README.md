@@ -6,7 +6,7 @@ constraints and open questions.
 
 | # | Item | Status | Depends on |
 |---|------|--------|-----------|
-| [01](01-docking.md) | Realistic docking — **includes the attitude model as phase 0** | Next up | — |
+| [01](01-docking.md) | Realistic docking — attitude phase **done**, mechanics next | In progress | — |
 | [02](02-cold-start.md) | Cold start and systems configuration | Not started | — (can run in parallel) |
 | [03](03-launch.md) | Launch from Earth | Not started | 01 (attitude), 02 (pad state) |
 | [04](04-new-missions.md) | New missions | Awaiting examples | 01 / 03 per mission |
