@@ -61,6 +61,9 @@ function boot(file = GAME) {
   simBurn, coastEncounter, transferWindow, solveBurn, targetEncounter,
   setOrbit, MISSIONS, startBurn, timeToIgnition, rcsDV, dvRemaining,
   PAGES, CDU, PAGEKEYS, MSGS, gotoPage, renderCDU, fire, armSolution,
+  dockGeom, dockGuide, dockTarget, rcsPulse, utilitiesDone, DOCK_ENV,
+  inProxOps, fmtRange, fmtRate, commandedTheta, attError, makeStation,
+  PORT_ARM, PORT_ARM_STN, dockLeg, stepDock, DOCK_HOLD, DOCK_STAND,
   get S(){ return S; }, get D(){ return D; },
   get CURRENT(){ return CURRENT; }, get spMessage(){ return spMessage; },
 };`);

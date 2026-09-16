@@ -532,7 +532,7 @@ const S = {
   mission: null, objectives: [], status: 'idle',
   craft: { name:'—', dry:2200, fuel:0, fuelMax:0, thrust:0, isp:311,
            rcs:0, rcsMax:0, rcsIsp:220, crew:0 },
-  power: { batt:100, battMax:100, area:14, eff:0.29, load:340, gen:0, ecl:false },
+  power: { batt:100, battMax:100, area:14, eff:0.29, load:340, gen:0, tie:0, ecl:false },
   therm: { hull:20 },
   loads: { HEAT:true, SCI:false, COMM:true },
   ledger: { dvUsed:0, burns:0 },
@@ -542,7 +542,25 @@ const S = {
   // Attitude is real state now: a planar sim, so one angle plus its rate.
   // `mode` is what the autopilot is chasing; `theta` is where the nose is.
   att: { theta: 0, rate: 0, mode: 'PRO', inertial: 0, slewing: false },
+  dock: freshDock(),
 };
+
+/* ---- docking state ----------------------------------------------------
+   `phase` walks FREE → SOFT → RETRACT → RETRACTED → LATCHING → HARD, and the
+   four utility groups hang off a hard dock. Everything here is plain state
+   the pages read; nothing is derived on the fly. */
+function freshDock() {
+  return {
+    phase: 'FREE', leg: null,
+    misalign: 0, misalign0: 0, sign: 1, offset: 0,
+    ring: 0, latches: 0, latching: false,
+    auto: false, autoT: 0, attempts: 0, bounces: 0, passed: false,
+    vest: { valve:false, press:0, check:-1, leakOk:false, hatch:false },
+    pwr:  { umb:false, tie:false },
+    air:  { duct:false, fan:false },
+    prop: { line:false, purge:0, purged:false, xfer:false, moved:0, done:false },
+  };
+}
 
 const craftMass = () => S.craft.dry + S.craft.fuel + S.craft.rcs;
 const dvRemaining = () => {
@@ -571,6 +589,10 @@ function derive() {
     ecl = along < 0 && perp < b.R;
   }
   const gen = ecl ? 0 : flux * S.power.area * S.power.eff;
+  // Tied to the station, its bus carries the vehicle and the battery stops
+  // working. This is the visible payoff of the power hookup.
+  const tie = S.dock.pwr.tie ? (S.craft.stationSupply || 2000) : 0;
+  S.power.tie = tie;
   let load = 120;                                          // avionics floor
   if (S.loads.HEAT) load += 140;
   if (S.loads.COMM) load += 80;
@@ -582,7 +604,7 @@ function derive() {
   const earth = absState('EARTH', S.t).r;
   const dEarth = V.len(V.sub(V.add(sunR, S.r), earth));
   return D = {
-    e, b, alt, dSun, flux, ecl, gen, load,
+    e, b, alt, dSun, flux, ecl, gen, load, tie,
     dEarth, lightTime: dEarth / 299792.458,
     apoAlt: e.ra === Infinity ? Infinity : e.ra - b.R,
     perAlt: e.rp - b.R,
@@ -594,8 +616,11 @@ function derive() {
 
 /* ---- power / thermal integration --------------------------- */
 function stepSystems(dt) {
-  const net = (S.power.gen - S.power.load) * dt / 3600;   // Wh
+  const net = (S.power.gen + S.power.tie - S.power.load) * dt / 3600;   // Wh
   S.power.batt = Math.max(0, Math.min(S.power.battMax, S.power.batt + net));
+  // Breathing is only free once the station's air is ducted through the hatch.
+  if (S.craft.crew && !S.dock.air.fan)
+    S.craft.o2 = Math.max(0, S.craft.o2 - S.craft.crew * dt / 3600);
   // radiative equilibrium, relaxed
   const eq = Math.pow(Math.max(D.flux,1) * 0.28 / (4 * 5.670374e-8 * 0.85), 0.25) - 273.15;
   const k = 1 - Math.exp(-dt / 5400);
@@ -620,6 +645,10 @@ function commandedTheta(mode) {
     case 'RIN':  return ang(S.r) + Math.PI;
     case 'TGT':  { const t = targetRel(); return t ? ang(t.r) : S.att.theta; }
     case 'ATGT': { const t = targetRel(); return t ? ang(t.r) + Math.PI : S.att.theta; }
+    // Down the station's docking axis, nose-first into its port. The station
+    // holds an Earth-facing attitude, so this reference turns at orbital rate
+    // — 0.065°/s, which the autopilot tracks without noticing.
+    case 'PAXS': { const g = dockGeom(); return g ? g.axisAngle + Math.PI : S.att.theta; }
     case 'INRT': return S.att.inertial;
     case 'FREE': return S.att.theta;
     default:     return ang(S.v);
@@ -648,6 +677,9 @@ function slewTime(ang, maxRate, accel) {
  *  slew that outlasts the chunk is integrated. */
 function stepAttitude(dt) {
   const a = S.att, c = S.craft;
+  // Mated to a station the vehicle has no attitude of its own — the interface
+  // holds it. stepDock places it each step.
+  if (S.dock.phase !== 'FREE') { a.rate = 0; a.slewing = false; return; }
   if (a.mode === 'FREE' || dt <= 0) { a.rate = 0; a.slewing = false; return; }
   const maxRate = c.slewRate || 4*Math.PI/180;
   const accel   = c.slewAccel || 2*Math.PI/180;
@@ -688,6 +720,325 @@ function stepAttitude(dt) {
 /** Thrust comes out of the nose. */
 function thrustDir() {
   return { x: Math.cos(S.att.theta), y: Math.sin(S.att.theta) };
+}
+
+/* ---- docking ------------------------------------------------------------
+   Both vehicles carry a port on a mast, so the nose angle and the port's
+   position are coupled: a 10° misalignment swings this vehicle's port 0.43 m
+   sideways. That coupling is the whole reason alignment matters — without a
+   mast, pointing would be cosmetic.
+
+   The station holds an Earth-facing attitude (nose along its velocity) and
+   its port faces aft. So the approach runs up the velocity vector from
+   behind, and a vehicle sitting on that line is in the SAME orbit as the
+   station: it stays there for free. An inertially-fixed station would sweep
+   its corridor a full turn every 92 minutes, which is not a corridor at all.  */
+const PORT_ARM = 0.0025;        // km — this vehicle's port, 2.5 m ahead of the CoM
+const PORT_ARM_STN = 0.006;     // km — the station's port, 6 m out from its centre
+const DOCK_ENV = {
+  closeClean: 0.10, closeMax: 0.15,       // m/s  closing at contact
+  latClean:   0.10, latMax:   0.25,       // m    port-to-port miss distance
+  rateClean:  0.02, rateMax:  0.05,       // m/s  lateral rate at contact
+  alignClean: 4,    alignMax: 10,         // deg  nose vs the docking axis
+  structure:  1.0,                        // m    beyond this you miss the ring entirely
+};
+
+/** The station this vehicle can dock with, or null. */
+function dockTarget() {
+  if (S.target !== 'STATION') return null;
+  return S.objects.find(x => x.id === 'STATION' && x.soi === S.soi) || null;
+}
+
+/** Everything the approach is flown on, in metres and m/s.
+ *
+ *  `axial` is distance out along the station's port axis — zero is contact.
+ *  `lateral` is the signed miss distance across it. `align` is the one angle
+ *  this flat world has: there is no separate roll. */
+function dockGeom() {
+  const o = dockTarget();
+  if (!o) return null;
+  const stTheta = Math.atan2(o.v.y, o.v.x);            // station nose, along its velocity
+  const axisAngle = stTheta + Math.PI;                 // its port faces aft
+  const axis = { x: Math.cos(axisAngle), y: Math.sin(axisAngle) };
+  const lat  = { x: -axis.y, y: axis.x };
+  const wS = V.crs(o.r, o.v) / V.dot(o.r, o.r);        // Earth-facing ⇒ turns at orbital rate
+  const armS = V.mul(axis, PORT_ARM_STN);
+  const Ps = V.add(o.r, armS);
+  const Vs = V.add(o.v, V.mul({ x:-armS.y, y:armS.x }, wS));
+  const nose = { x: Math.cos(S.att.theta), y: Math.sin(S.att.theta) };
+  const armC = V.mul(nose, PORT_ARM);
+  const Pc = V.add(S.r, armC);
+  const Vc = V.add(S.v, V.mul({ x:-armC.y, y:armC.x }, S.att.rate));
+  const d = V.sub(Pc, Ps), dv = V.sub(Vc, Vs);
+  const aKm = V.dot(d, axis), lKm = V.dot(d, lat);
+  // Rates are taken in the PORT's frame, not an inertial one. The corridor
+  // turns with the station at orbital rate, so a vehicle holding a constant
+  // inertial velocity slides across it at wS × range — 0.013 m/s ten metres
+  // out, most of the clean lateral-rate budget. Reported inertially, the
+  // lateral rate does not match the lateral offset it is meant to be moving,
+  // and capture would be judged against a rate the interface never sees.
+  return {
+    obj: o, axis, lat, axisAngle, stTheta, wS,
+    axial: aKm * 1000, lateral: lKm * 1000,
+    closing: -(V.dot(dv, axis) + wS * lKm) * 1000,
+    latRate:  (V.dot(dv, lat)  - wS * aKm) * 1000,
+    align: angDiff(S.att.theta, stTheta) * 180/Math.PI,
+    corridor: Math.atan2(Math.abs(lKm), Math.max(aKm, 1e-12)) * 180/Math.PI,
+    range: V.len(d) * 1000,
+    ctrRange: V.len(V.sub(o.r, S.r)) * 1000,
+  };
+}
+
+/** Spend RCS along a unit direction. The one place relative velocity changes. */
+function rcsPulse(dirUnit, dvMs) {
+  if (!(dvMs > 0)) return 0;
+  const m0 = craftMass();
+  const used = Math.min(S.craft.rcs, m0 * (1 - Math.exp(-dvMs/(S.craft.rcsIsp*G0))));
+  S.craft.rcs = Math.max(0, S.craft.rcs - used);
+  S.v = V.add(S.v, V.mul(dirUnit, dvMs/1000));
+  return used;
+}
+
+/** Hold the vehicle on the interface. While mated it has no trajectory of its
+ *  own — the station's structure carries it, so it is placed, not propagated. */
+function mateToPort() {
+  const o = dockTarget(); if (!o) return;
+  const dk = S.dock;
+  const stTheta = Math.atan2(o.v.y, o.v.x);
+  S.att.theta = normAngle(stTheta + dk.sign * dk.misalign * Math.PI/180);
+  S.att.rate = 0; S.att.slewing = false;
+  const axis = { x: Math.cos(stTheta + Math.PI), y: Math.sin(stTheta + Math.PI) };
+  const nose = { x: Math.cos(S.att.theta), y: Math.sin(S.att.theta) };
+  S.r = V.sub(V.add(o.r, V.mul(axis, PORT_ARM_STN)), V.mul(nose, PORT_ARM));
+  S.v = { x:o.v.x, y:o.v.y };
+}
+
+/** Come off the ring. Nothing is destroyed — the cost is propellant and time. */
+function dockBounce(g, why) {
+  S.dock.bounces++;
+  S.v = V.add(S.v, V.mul(g.axis, g.closing * 1.5 / 1000));    // reflect at e = 0.5
+  say(`NO CAPTURE — ${why}. Bounced off at ${(g.closing*0.5).toFixed(2)} m/s. Back off, re-centre and fly it again.`, 'err');
+}
+
+/** Resolve a contact: clean capture, crooked capture, or a bounce. */
+function dockContact(g) {
+  const dk = S.dock;
+  dk.attempts++;
+  const al = Math.abs(g.align), off = Math.abs(g.lateral), lr = Math.abs(g.latRate);
+  const why = g.closing > DOCK_ENV.closeMax ? `closing ${g.closing.toFixed(2)} m/s, limit ${DOCK_ENV.closeMax.toFixed(2)}`
+    : lr  > DOCK_ENV.rateMax  ? `lateral rate ${lr.toFixed(3)} m/s, limit ${DOCK_ENV.rateMax.toFixed(2)}`
+    : off > DOCK_ENV.latMax   ? `${off.toFixed(2)} m off centre, limit ${DOCK_ENV.latMax.toFixed(2)} m`
+    : al  > DOCK_ENV.alignMax ? `${al.toFixed(1)}° off axis, limit ${DOCK_ENV.alignMax.toFixed(0)}°`
+    : null;
+  if (why) return dockBounce(g, why);
+
+  dk.phase = 'SOFT';
+  dk.sign = g.align >= 0 ? 1 : -1;
+  dk.misalign = dk.misalign0 = al;
+  dk.offset = off;
+  dk.ring = 0; dk.latches = 0; dk.latching = false; dk.auto = false;
+  S.att.mode = 'FREE';
+  mateToPort();
+  const clean = al <= DOCK_ENV.alignClean && off <= DOCK_ENV.latClean
+             && g.closing <= DOCK_ENV.closeClean && lr <= DOCK_ENV.rateClean;
+  if (clean) say(`SOFT CAPTURE · clean · ${g.closing.toFixed(2)} m/s, ${off.toFixed(2)} m off centre, ${al.toFixed(1)}° off axis. Retract the ring.`, 'ok');
+  else say(`SOFT CAPTURE · CROOKED · ${al.toFixed(1)}° off axis, ${off.toFixed(2)} m off centre. The latches will not close on that — retract the ring to pull it straight.`, 'warn');
+  checkObjectives();
+}
+
+/** Air, power, ECLSS and propellant are all connected. */
+const utilitiesDone = () => {
+  const d = S.dock;
+  return d.phase === 'HARD' && d.vest.hatch && d.pwr.tie && d.air.fan && d.prop.done;
+};
+
+/** One integration step of everything docking: contact, the ring, the latches
+ *  and the utility procedures. Runs after the world has moved. */
+function stepDock(dt) {
+  const dk = S.dock;
+
+  if (dk.phase === 'FREE') {
+    const g = dockGeom();
+    if (!g) { dk.leg = null; return; }
+    // The approach leg is carried in state whether or not the autopilot is
+    // flying, so a hand-flown approach gets the same call on the DOCK page.
+    if (g.ctrRange < 500) dk.leg = dockLeg(g, dk.leg); else dk.leg = null;
+    if (g.axial > 0.5) dk.passed = false;
+    // Only judge a contact when the vehicle has actually gone by the port.
+    // Without the range guard, a rendezvous that arrives ahead of the station
+    // crosses the port PLANE tens of kilometres out and is told it flew past.
+    if (g.axial <= 0 && g.closing > 0 && !dk.passed && g.ctrRange < 20) {
+      if (Math.abs(g.lateral) > DOCK_ENV.structure) {
+        dk.passed = true;
+        say(`PAST THE PORT — ${Math.abs(g.lateral).toFixed(2)} m wide of the ring, no contact. Back off along the axis and re-centre.`, 'warn');
+      } else dockContact(g);
+    }
+    return;
+  }
+
+  // Mated. The interface carries the vehicle; place it on the station.
+  mateToPort();
+
+  if (dk.phase === 'RETRACT') {
+    // A crooked interface takes longer to pull straight — that is the cost of
+    // a sloppy capture, and it is paid in time, not in wreckage.
+    dk.ring = Math.min(1, dk.ring + dt / (20 + dk.misalign0 * 6));
+    dk.misalign = dk.misalign0 * (1 - dk.ring);
+    if (dk.ring >= 1) {
+      dk.misalign = 0; dk.phase = 'RETRACTED';
+      say('RING RETRACTED · interface aligned 0.0°, hard-dock ready. Close the latches.', 'ok');
+    }
+  } else if (dk.phase === 'LATCHING') {
+    dk.latches = Math.min(12, dk.latches + dt * 0.5);
+    if (dk.latches >= 12) {
+      dk.latches = 12; dk.latching = false; dk.phase = 'HARD';
+      say('HARD DOCK · 12 of 12 structural latches closed. The vestibule is sealed but empty — equalise it before opening a hatch.', 'ok');
+      checkObjectives();
+    }
+  }
+
+  if (dk.phase !== 'HARD') return;
+
+  const ve = dk.vest;
+  if (ve.valve && ve.press < 101.3) ve.press = Math.min(101.3, ve.press + 101.3 * dt / 90);
+  if (ve.check >= 0 && !ve.leakOk) {
+    if (ve.valve) { ve.check = -1; say('LEAK CHECK ABORTED — the equalisation valve reopened.', 'warn'); }
+    else {
+      ve.check += dt;
+      if (ve.check >= 60) { ve.leakOk = true; say('LEAK CHECK COMPLETE · 60 s, no measurable decay. The hatch may be opened.', 'ok'); }
+    }
+  }
+  const pr = dk.prop;
+  if (pr.line && !pr.purged) {
+    pr.purge = Math.min(30, pr.purge + dt);
+    if (pr.purge >= 30) { pr.purged = true; say('TRANSFER LINE PURGED · ready to flow.', 'ok'); }
+  }
+  if (pr.xfer) {
+    if (!dk.pwr.tie) { pr.xfer = false; say('TRANSFER STOPPED — the pumps lost the station bus.', 'warn'); }
+    else {
+      let q = 0.5 * dt;                                 // kg/s through the coupling
+      const mainRoom = Math.max(0, S.craft.fuelMax - S.craft.fuel);
+      const take = Math.min(q, mainRoom); S.craft.fuel += take; q -= take;
+      const rcsRoom = Math.max(0, S.craft.rcsMax - S.craft.rcs);
+      const take2 = Math.min(q, rcsRoom); S.craft.rcs += take2; q -= take2;
+      pr.moved += take + take2;
+      if (q > 0) { pr.xfer = false; pr.done = true; say(`TRANSFER COMPLETE · ${pr.moved.toFixed(1)} kg aboard, tanks full.`, 'ok'); }
+    }
+  }
+  if (utilitiesDone()) checkObjectives();
+}
+
+/* ---- approach guidance --------------------------------------------------
+   Exposed as a plain function of the relative state so the same law can fly
+   the vehicle (AUTO DOCK) and be driven step by step by a test. It returns
+   the commands it would issue; it changes nothing itself.                  */
+const DOCK_HOLD = 35;      // m — the hold point on the axis, where the approach starts
+const DOCK_STAND = 40;     // m — how far to the side to sit while repositioning
+const LEGNAME = { CLEAR:'MOVE CLEAR', BEHIND:'GO ASTERN', CENTRE:'CENTRE UP',
+                  CLOSING:'CLOSE IN', CORRIDOR:'IN THE CORRIDOR', CONTACT:'FINAL' };
+
+/** Is the vehicle on the corridor well enough to just fly it in?
+ *  The hold point matters for ACQUIRING the axis, not for being on it: a
+ *  vehicle already centred ten metres out is in the corridor, not out of it. */
+const onCorridor = (g) => g.axial > 1 && Math.abs(g.lateral) <= Math.max(6, g.axial * 0.25);
+
+/** Which leg of the approach applies, given the leg already being flown.
+ *
+ *  The sequence latches. Deciding afresh every step chatters: a leg's exit
+ *  test and the next leg's target disagree by a metre or two, orbital drift
+ *  carries the vehicle back across the boundary, and the controller flips
+ *  between a 0.8 m/s command and a 0 m/s command until the tanks are dry.
+ *  Once a leg is entered it is flown until its own target is reached. */
+function dockLeg(g, leg) {
+  const off = Math.abs(g.lateral);
+  const corridor = () => g.axial > 100 ? 'CLOSING' : g.axial > 10 ? 'CORRIDOR' : 'CONTACT';
+  switch (leg) {
+    case 'CLEAR':  return off >= DOCK_STAND - 3 ? dockLeg(g, 'BEHIND') : 'CLEAR';
+    case 'BEHIND': return g.axial >= DOCK_HOLD + 3 ? dockLeg(g, 'CENTRE') : 'BEHIND';
+    case 'CENTRE': return (off <= 2 && g.axial >= DOCK_HOLD - 5) ? corridor() : 'CENTRE';
+    case 'CLOSING': case 'CORRIDOR': case 'CONTACT':
+      // Only fall back out of the corridor for a miss far wider than the one
+      // that would have stopped us entering it.
+      return off > Math.max(10, g.axial * 0.35) ? 'CENTRE' : corridor();
+    default:
+      if (onCorridor(g)) return corridor();
+      if (g.axial >= DOCK_HOLD + 3) return 'CENTRE';
+      if (off >= DOCK_STAND - 3) return 'BEHIND';
+      return 'CLEAR';
+  }
+}
+
+/** The commands the approach law would issue, given the relative state and the
+ *  leg being flown. Pure: it reads nothing and changes nothing. */
+function dockGuide(g, leg) {
+  if (!g) return null;
+  // A rendezvous does not leave you on the corridor — it leaves you beside the
+  // station, usually ahead of its port. Getting onto the axis is a box: out to
+  // the side, astern to the hold point, then in to the centreline. The route
+  // never crosses the station's face.
+  leg = dockLeg(g, leg);
+  const sgn = g.lateral >= 0 ? 1 : -1;
+  let want = {};
+  if (leg === 'CLOSING' || leg === 'CORRIDOR' || leg === 'CONTACT') {
+    const off = Math.abs(g.lateral);
+    // Slow down as the port comes up: 0.30 m/s outside 20 m, easing to
+    // 0.05 m/s at contact — inside the 0.10 m/s clean band with no final flare.
+    const vProfile = Math.min(0.30, 0.05 + g.axial / 80);
+    // Inside twelve metres, stop and centre rather than press on and bounce.
+    // That is what a crew does, and holding range is far cheaper than a bounce.
+    const tol = Math.max(DOCK_ENV.latClean * 0.8, g.axial * 0.06);
+    const hold = off > tol && g.axial < 12;
+    want.closing = hold ? 0 : vProfile;
+    want.hold = hold;
+    // Aim to be centred by half way to contact — but take the time from the
+    // approach PROFILE, never from the held command, or holding range drives
+    // the time-to-contact to infinity and the lateral command to nothing.
+    // The cap and the deadband both shrink with range for the same reason:
+    // a fixed pair leaves the last quarter metre permanently uncorrected,
+    // which put every approach on the 0.25 m limit.
+    const tc = g.axial / Math.max(vProfile, 0.02);
+    const cap = Math.min(0.03, Math.max(0.005, g.axial * 0.004));
+    const latCmd = hold ? -g.lateral * 0.05 : -g.lateral / Math.max(tc * 0.5, 10);
+    want.latRate = Math.max(-cap, Math.min(cap, latCmd));
+    want.latDead = Math.max(0.0008, Math.min(0.003, cap * 0.3));
+  } else {
+    let tAx, tLat, vmax = 0.8;
+    if (leg === 'CLEAR')       { tAx = g.axial; tLat = sgn * DOCK_STAND; }
+    else if (leg === 'BEHIND') { tAx = DOCK_HOLD + 6; tLat = g.lateral; }
+    else                       { tAx = Math.max(g.axial, DOCK_HOLD); tLat = 0; vmax = 0.6; }
+    const rate = (e) => Math.max(-vmax, Math.min(vmax, e * 0.03));
+    want.closing = -rate(tAx - g.axial);
+    want.latRate = rate(tLat - g.lateral);
+    want.target = { axial: tAx, lateral: tLat };
+  }
+  const axErr = g.closing - want.closing, latErr = g.latRate - want.latRate;
+  return {
+    leg, name: LEGNAME[leg], theta: normAngle(g.stTheta),  // nose down the axis, into the port
+    vWant: want.closing, latWant: want.latRate, target: want.target || null,
+    hold: !!want.hold, axErr, latErr,
+    axial:   Math.abs(axErr)  > 0.012 ? -axErr  : 0,       // + closes on the port
+    lateral: Math.abs(latErr) > (want.latDead || 0.003) ? -latErr : 0,
+  };
+}
+
+/** Fly one step of `dockGuide`'s output. Pulses are impulsive: a 0.05 m/s
+ *  nudge on real thrusters lasts a fraction of a second, so there is no
+ *  controller here to diverge at the coasting chunk size. */
+function dockAutoStep(dt) {
+  const dk = S.dock;
+  if (!dk.auto || dk.phase !== 'FREE') return;
+  const g = dockGeom();
+  if (!g) { dk.auto = false; return; }
+  dk.autoT = (dk.autoT || 0) + dt;
+  if (dk.autoT < 2) return;                 // thrusters fire at most every 2 s
+  dk.autoT = 0;
+  if (S.att.mode !== 'PAXS') setAttMode('PAXS');
+  if (attError() > 2*Math.PI/180) return;   // point first, then translate
+  const cmd = dockGuide(g, dk.leg);
+  dk.leg = cmd.leg;
+  if (cmd.axial) rcsPulse(V.mul(g.axis, -Math.sign(cmd.axial)), Math.abs(cmd.axial));
+  if (cmd.lateral) rcsPulse(V.mul(g.lat, Math.sign(cmd.lateral)), Math.abs(cmd.lateral));
+  if (S.craft.rcs <= 0) { dk.auto = false; say('AUTO DOCK DISENGAGED — RCS propellant exhausted.', 'err'); }
 }
 /** Point the vehicle, without lighting anything. */
 function setAttMode(mode, inertial) {
@@ -769,8 +1120,20 @@ function patchSOI() {
 }
 
 /* ---- the clock --------------------------------------------- */
+/** True while the vehicle is close enough that the clock must run near real time. */
+function inProxOps() {
+  if (S.dock.phase !== 'FREE') return false;
+  const g = dockGeom();
+  return !!(g && g.ctrRange < 500);
+}
+
 function advance(dtSim) {
   if (S.status !== 'flight') return;
+  // Nobody time-warps a docking, and the step could not resolve it if they did.
+  if (inProxOps() && S.warp > 10) {
+    S.warp = 10;
+    if (!S.warnedProx) { S.warnedProx = true; say('Warp limited to 10× inside 500 m — this is flown in something close to real time.', 'warn'); }
+  } else if (!inProxOps()) S.warnedProx = false;
   let left = dtSim, guard = 0;
   while (left > 1e-9 && guard++ < 220) {
     let dt;
@@ -801,6 +1164,18 @@ function advance(dtSim) {
       // never step past an armed burn's ignition point, however fast the clock runs
       const ti = timeToIgnition();
       if (isFinite(ti) && ti > 0) cap = Math.min(cap, Math.max(0.25, ti));
+      // Docking is centimetre work and the coasting chunk is sized for orbits:
+      // 17 s at station altitude, nearly two metres of travel at a docking
+      // closing rate. That steps straight over a capture envelope measured in
+      // tenths of a metre, so near a port the chunk is bounded by travel.
+      if (S.dock.phase === 'FREE') {
+        const pg = dockGeom();
+        if (pg && pg.ctrRange < 500) {
+          const travel = Math.max(0.02, Math.min(2, Math.abs(pg.axial) * 0.02));     // m per chunk
+          const rel = Math.hypot(pg.closing, pg.latRate);                            // m/s
+          cap = rel > 1e-6 ? Math.min(cap, Math.max(0.05, travel / rel)) : Math.min(cap, 5);
+        }
+      }
       dt = Math.min(left, cap);
     }
     // Point before thrusting. Running the slew after the burn step would make
@@ -808,13 +1183,17 @@ function advance(dtSim) {
     // assumes the vehicle is pointed — would no longer predict the flight. Over
     // an 800 s injection that lag is enough to miss a sphere of influence.
     stepAttitude(dt);
-    if (S.burn) burnStep(dt); else {
+    if (S.burn) burnStep(dt); else if (S.dock.phase === 'FREE') {
       const b = soiBody();
       const out = propagate(S.r, S.v, b.mu, dt);
       S.r = out.r; S.v = out.v;
     }
     S.t += dt; left -= dt;
     for (const o of S.objects) stepObject(o, dt);
+    // Attitude leads thrust; docking follows the world. Contact can only be
+    // judged once both vehicles have been moved.
+    stepDock(dt);
+    dockAutoStep(dt);
     derive();
     stepSystems(dt);
     if (patchSOI()) { derive(); }
@@ -1097,6 +1476,30 @@ function drawProximity(tgt) {
   cx2.beginPath(); cx2.moveTo(W/2-8,H/2); cx2.lineTo(W/2+8,H/2);
   cx2.moveTo(W/2,H/2-8); cx2.lineTo(W/2,H/2+8); cx2.strokeStyle='#1E5A48'; cx2.stroke();
 
+  const TX = W/2 + P(tgt.r.x), TY = H/2 - P(tgt.r.y);
+  // The docking corridor: the port's axis out of the station, and the cone the
+  // approach has to stay inside. Drawn from the port, not the station's centre.
+  const g = dockGeom();
+  if (g) {
+    const PX_ = W/2 + P(tgt.r.x + g.axis.x*PORT_ARM_STN), PY_ = H/2 - P(tgt.r.y + g.axis.y*PORT_ARM_STN);
+    const L = P(Math.max(range*1.6, 0.05));
+    const half = Math.atan2(DOCK_ENV.latMax/1000, Math.max(g.axial,1)/1000);
+    const a0 = Math.atan2(g.axis.y, g.axis.x);
+    cx2.save(); cx2.translate(PX_, PY_);
+    for (const s of [-1, 1]) {
+      cx2.beginPath(); cx2.moveTo(0,0);
+      cx2.lineTo(Math.cos(a0 + s*Math.min(half, 0.5))*L, -Math.sin(a0 + s*Math.min(half, 0.5))*L);
+      cx2.strokeStyle = '#1B3A44'; cx2.setLineDash([2,4]); cx2.lineWidth = 1; cx2.stroke();
+    }
+    cx2.setLineDash([]);
+    cx2.beginPath(); cx2.moveTo(0,0); cx2.lineTo(Math.cos(a0)*L, -Math.sin(a0)*L);
+    cx2.strokeStyle = '#1E5A48'; cx2.lineWidth = 1; cx2.stroke();
+    // the port itself
+    cx2.beginPath(); cx2.arc(0,0,3.2,0,TAU);
+    cx2.strokeStyle = S.dock.phase === 'FREE' ? '#E8C04A' : '#57C08A'; cx2.lineWidth = 1.6; cx2.stroke();
+    cx2.restore();
+  }
+
   // relative velocity vector (scaled for legibility)
   const rv = tgt.v, rvm = V.len(rv);
   if (rvm > 1e-7) {
@@ -1106,14 +1509,16 @@ function drawProximity(tgt) {
     cx2.lineTo(W/2 + u.x*s, H/2 - u.y*s);
     cx2.strokeStyle = '#E4553C'; cx2.lineWidth = 1.4; cx2.stroke();
   }
-  const TX = W/2 + P(tgt.r.x), TY = H/2 - P(tgt.r.y);
   cx2.beginPath(); cx2.arc(TX,TY,5,0,TAU); cx2.strokeStyle='#E8C04A'; cx2.lineWidth=1.4; cx2.stroke();
   cx2.beginPath(); cx2.arc(TX,TY,1.6,0,TAU); cx2.fillStyle='#E8C04A'; cx2.fill();
-  cx2.beginPath(); cx2.moveTo(6,0); cx2.closePath();
-  cx2.fillStyle = '#F2A33C';
-  cx2.beginPath(); cx2.arc(W/2,H/2,3,0,TAU); cx2.fill();
+  // own vehicle, pointing where the nose points
+  cx2.save(); cx2.translate(W/2, H/2); cx2.rotate(-S.att.theta);
+  cx2.beginPath(); cx2.moveTo(7,0); cx2.lineTo(-4,-3.4); cx2.lineTo(-4,3.4); cx2.closePath();
+  cx2.fillStyle = '#F2A33C'; cx2.fill();
   cx2.restore();
-  document.getElementById('scope-tag').textContent = 'PROXIMITY OPS · STATION';
+  cx2.restore();
+  document.getElementById('scope-tag').textContent = 'PROXIMITY OPS · STATION'
+    + (g && S.dock.phase !== 'FREE' ? '  ▸ ' + S.dock.phase : g ? `  ▸ ${g.axial.toFixed(1)} m` : '');
   document.getElementById('scope-scale').textContent = `⟷ ${(span/5*1000).toFixed(0)} m/ring`;
 }
 
@@ -1142,6 +1547,21 @@ function fmtVel(kms) {
   return Math.abs(kms) < 1 ? (kms*1000).toFixed(1) + ' m/s' : kms.toFixed(3) + ' km/s';
 }
 function fmtDV(ms) { return (ms >= 1000 ? (ms/1000).toFixed(3)+' km/s' : ms.toFixed(1)+' m/s'); }
+/* Proximity operations are worked in centimetres and hundredths of a metre per
+   second. fmtDist renders both 0.15 m and 0.25 m as "0 m" and fmtVel renders
+   0.03 m/s as "0.0 m/s" — at docking scale those are the difference between a
+   clean capture and a bounce, so the corridor gets its own two formatters. */
+function fmtRange(m) {
+  if (!isFinite(m)) return '——';
+  const s = m < 0 ? '−' : ''; m = Math.abs(m);
+  if (m < 10)   return s + m.toFixed(2) + ' m';
+  if (m < 1000) return s + m.toFixed(1) + ' m';
+  return s + (m/1000).toFixed(2) + ' km';
+}
+function fmtRate(ms) {
+  if (!isFinite(ms)) return '——';
+  return (Math.abs(ms) < 10 ? ms.toFixed(3) : ms.toFixed(1)) + ' m/s';
+}
 function fmtT(sec) {
   if (!isFinite(sec)) return '——';
   const neg = sec < 0 ? '-' : ''; sec = Math.abs(Math.round(sec));
@@ -1257,10 +1677,14 @@ const DIRS = {
 };
 const DIRNAME = { PRO:'prograde', RET:'retrograde', ROUT:'radial out', RIN:'radial in' };
 const ATTNAME = { PRO:'PROGRADE', RET:'RETROGRADE', ROUT:'RADIAL OUT', RIN:'RADIAL IN',
-                  TGT:'TARGET', ATGT:'ANTI-TARGET', INRT:'INERTIAL', FREE:'FREE DRIFT' };
+                  TGT:'TARGET', ATGT:'ANTI-TARGET', INRT:'INERTIAL', FREE:'FREE DRIFT',
+                  PAXS:'DOCK AXIS' };
+/** What the ORB page should call the current attitude. */
+const attLabel = () => S.dock.phase !== 'FREE' ? 'MATED' : (ATTNAME[S.att.mode] || S.att.mode);
 
 function startBurn(dir, dur, scheduled) {
   if (S.status !== 'flight') return say('Vehicle is not in flight.', 'err');
+  if (S.dock.phase !== 'FREE') return say('MATED TO THE STATION — the main engine is inhibited. UNDOCK first.', 'err');
   if (S.craft.fuel <= 0) return say('No main propellant remaining.', 'err');
   if (S.burn) return say('Engine already lit. CANCEL first.', 'err');
   S.preBurnWarp = S.warp;
@@ -1344,9 +1768,12 @@ function exec(raw) {
   }
 
   case 'HOLD': case 'ATT': {
-    const extra = { TGT:'TGT', TARGET:'TGT', ATGT:'ATGT', FREE:'FREE', INRT:'INRT' };
+    const extra = { TGT:'TGT', TARGET:'TGT', ATGT:'ATGT', FREE:'FREE', INRT:'INRT',
+                    DOCK:'PAXS', AXIS:'PAXS', PAXS:'PAXS' };
     const dir = DIRS[A[0]] || extra[A[0]];
-    if (!dir) return say('Usage: HOLD <PRO|RET|RIN|ROUT|TGT|ATGT|FREE>', 'err');
+    if (!dir) return say('Usage: HOLD <PRO|RET|RIN|ROUT|TGT|ATGT|DOCK|FREE>', 'err');
+    if (S.dock.phase !== 'FREE') return say('MATED — the interface holds the attitude.', 'err');
+    if (dir === 'PAXS' && !dockGeom()) return say('No docking target. Try  TGT STATION.', 'err');
     setAttMode(dir);
     return say(`ATTITUDE HOLD · ${ATTNAME[dir]}`, 'sys');
   }
@@ -1359,6 +1786,7 @@ function exec(raw) {
       if (!isFinite(n)) return say('Usage: WARP <rate>  (0 holds the clock)', 'err');
       S.warp = WARPS.reduce((a,b) => Math.abs(b-n) < Math.abs(a-n) ? b : a); }
     if (S.burn && S.warp > 10) { S.warp = 10; say('Warp limited to 10× with the engine lit.', 'warn'); }
+    if (inProxOps() && S.warp > 10) { S.warp = 10; say('Warp limited to 10× inside 500 m.', 'warn'); }
     return say(S.warp === 0 ? 'Clock HOLD.' : `Time warp ${S.warp}×.`, 'sys');
   }
   case 'GO': case 'RUN': { S.warp = Math.max(1, S.warp); return say('Clock running.', 'sys'); }
@@ -1380,7 +1808,8 @@ function exec(raw) {
     if (S.solution) gotoPage('PLANR');
     return;
   }
-  case 'DOCK': case 'PROX': return gotoPage('DOCK');
+  case 'DOCK': case 'PROX': return cmdDock(A);
+  case 'UTIL': case 'UTILITIES': return gotoPage('UTIL');
   case 'TRANS': case 'RCS': return cmdTrans(A);
 
   case 'PWR': case 'POWER': case 'EPS': return cmdPwr(A);
@@ -1876,8 +2305,14 @@ function cmdTrans(A) {
   const mode = A[0] || '';
   if (mode === 'ON' || mode === 'OFF') return say('RCS is always available while propellant remains. Use TRANS to translate.', 'sys');
   if (!t) return say('No target set. Try  TGT STATION.', 'err');
-  const los = V.unit(t.r);
-  const perp = { x:-los.y, y:los.x };
+  if (S.dock.phase !== 'FREE') return say('MATED TO THE STATION — release the latches before translating.', 'err');
+  // Inside the corridor the thruster frame is the docking axis, not the line
+  // of sight to the station's centre: the two differ by the corridor angle,
+  // and it is the axis that capture is judged against.
+  const g = dockGeom();
+  const onAxis = !!(g && g.ctrRange < 500);
+  const los  = onAxis ? V.mul(g.axis, -1) : V.unit(t.r);
+  const perp = onAxis ? g.lat : { x:-V.unit(t.r).y, y:V.unit(t.r).x };
   let dirv, dv;
   if (mode === 'NULL') { dirv = V.unit(t.v); dv = V.len(t.v)*1000; }
   else {
@@ -1894,15 +2329,145 @@ function cmdTrans(A) {
     }
   }
   if (dv > rcsDV()) return say(`Only ${fmtDV(rcsDV())} of RCS remains.`, 'err');
-  const m0 = craftMass();
-  const used = m0 * (1 - Math.exp(-dv/(S.craft.rcsIsp*G0)));
-  S.craft.rcs = Math.max(0, S.craft.rcs - used);
-  S.v = V.add(S.v, V.mul(dirv, dv/1000));
-  say(`RCS pulse · ${fmtDV(dv)} ${mode.toLowerCase()}  (${used.toFixed(3)} kg)`, 'key');
+  const used = rcsPulse(dirv, dv);
+  say(`RCS pulse · ${fmtDV(dv)} ${mode.toLowerCase()}${onAxis ? ' (dock axis)' : ''}  (${used.toFixed(3)} kg)`, 'key');
   derive();
-  const nt = targetRel();
-  if (nt) say(`Range ${fmtDist(V.len(nt.r))}   closing ${fmtVel(-V.dot(V.unit(nt.r), nt.v))}`, 'out');
+  const ng = dockGeom();
+  if (ng && onAxis) say(`Axial ${fmtRange(ng.axial)}  closing ${fmtRate(ng.closing)}   lateral ${fmtRange(ng.lateral)} at ${fmtRate(ng.latRate)}`, 'out');
+  else { const nt = targetRel();
+    if (nt) say(`Range ${fmtDist(V.len(nt.r))}   closing ${fmtVel(-V.dot(V.unit(nt.r), nt.v))}`, 'out'); }
   checkObjectives();
+}
+
+/* ---- docking and the utility procedures ---------------------------------
+   Every step below is one key with one precondition and one thing you can
+   watch happen. The order is the real order: you cannot open a hatch onto
+   vacuum, and the transfer pumps run off the station's bus.               */
+function cmdDock(A) {
+  const dk = S.dock, s = A[0] || '';
+  const g = dockGeom();
+  const no = (m) => say(m, 'err');
+
+  switch (s) {
+  case '': return gotoPage('DOCK');
+
+  case 'AUTO': {
+    if (dk.phase !== 'FREE') return no('Already captured.');
+    if (!g) return no('No docking target. Try  TGT STATION.');
+    if (S.mission && S.mission.noAuto) return no('AUTO DOCK is inhibited for this flight — fly the approach by hand.');
+    dk.auto = !dk.auto; dk.autoT = 0;
+    if (dk.auto) setAttMode('PAXS');
+    return say(dk.auto ? 'AUTO DOCK ENGAGED · flying the corridor on RCS. Keep an eye on the budget.'
+                       : 'AUTO DOCK DISENGAGED · manual translation.', dk.auto ? 'key' : 'sys');
+  }
+
+  case 'RETRACT': {
+    if (dk.phase === 'RETRACT') return say('Ring already retracting.', 'sys');
+    if (dk.phase !== 'SOFT') return no('Nothing captured to retract.');
+    dk.phase = 'RETRACT';
+    return say(`RING RETRACTING · pulling ${dk.misalign0.toFixed(1)}° of misalignment out of the interface.`, 'key');
+  }
+
+  case 'LATCH': {
+    if (dk.phase === 'HARD') return say('Already hard docked.', 'sys');
+    if (dk.phase !== 'RETRACTED') return no('The ring is not home — RETRACT first.');
+    dk.phase = 'LATCHING'; dk.latching = true;
+    return say('LATCHES DRIVING · 12 structural latches closing.', 'key');
+  }
+
+  case 'UNDOCK': case 'RELEASE': {
+    if (dk.phase === 'FREE') return no('Not docked.');
+    const o = dockTarget();
+    const ax = o ? { x: Math.cos(Math.atan2(o.v.y,o.v.x) + Math.PI), y: Math.sin(Math.atan2(o.v.y,o.v.x) + Math.PI) } : null;
+    S.dock = freshDock();
+    S.att.mode = 'PAXS';
+    if (ax) S.v = V.add(S.v, V.mul(ax, 0.1/1000));     // separation springs, 0.10 m/s
+    say('UNDOCKED · hatch closed, utilities disconnected, latches open. Separation springs 0.10 m/s.', 'key');
+    return;
+  }
+
+  /* --- vestibule and hatch --- */
+  case 'EQUALISE': case 'EQ': case 'PRESS': {
+    if (dk.phase !== 'HARD') return no('Hard dock required before the vestibule can be pressurised.');
+    if (dk.vest.hatch) return no('The hatch is open — the vestibule is already at cabin pressure.');
+    dk.vest.valve = !dk.vest.valve;
+    // Aborting on the keypress, not a step later: the crew know at once.
+    const killed = dk.vest.valve && dk.vest.check >= 0 && !dk.vest.leakOk;
+    if (killed) dk.vest.check = -1;
+    return say(dk.vest.valve
+      ? 'EQUALISATION VALVE OPEN · vestibule pressurising, about 90 s to 101.3 kPa.' + (killed ? ' LEAK CHECK ABORTED.' : '')
+      : 'EQUALISATION VALVE CLOSED.', killed ? 'warn' : 'key');
+  }
+  case 'LEAK': {
+    if (dk.phase !== 'HARD') return no('Hard dock required.');
+    if (dk.vest.press < 100) return no(`Vestibule is at ${dk.vest.press.toFixed(1)} kPa — equalise to 100 kPa first.`);
+    if (dk.vest.leakOk) return say('Leak check already passed.', 'sys');
+    dk.vest.valve = false; dk.vest.check = 0;
+    return say('LEAK CHECK RUNNING · valve closed, holding 60 s and watching for decay.', 'key');
+  }
+  case 'HATCH': {
+    if (dk.phase !== 'HARD') return no('Hard dock required.');
+    if (dk.vest.hatch) { dk.vest.hatch = false; return say('HATCH CLOSED AND LOCKED.', 'key'); }
+    if (!dk.vest.leakOk) return no('Leak check has not passed — that hatch stays shut.');
+    dk.vest.hatch = true;
+    return say('HATCH OPEN · the vestibule is yours. Air ducts can go through now.', 'ok');
+  }
+
+  /* --- electrical --- */
+  case 'UMB': case 'UMBILICAL': {
+    if (dk.phase !== 'HARD') return no('Hard dock required before the umbilical can be mated.');
+    if (dk.pwr.tie) return no('Open the bus tie before demating the umbilical.');
+    dk.pwr.umb = !dk.pwr.umb;
+    return say(dk.pwr.umb ? 'UMBILICAL MATED · power and data connector engaged, tie open.'
+                          : 'UMBILICAL DEMATED.', 'key');
+  }
+  case 'TIE': case 'BUS': {
+    if (!dk.pwr.umb) return no('No umbilical — mate the connector first.');
+    dk.pwr.tie = !dk.pwr.tie;
+    derive();
+    return say(dk.pwr.tie ? `BUS TIE CLOSED · station bus 120 V, ${(S.craft.stationSupply||2000)} W available. Data link up. Your battery is off the hook.`
+                          : 'BUS TIE OPEN · back on internal power.', dk.pwr.tie ? 'ok' : 'warn');
+  }
+
+  /* --- ECLSS --- */
+  case 'DUCT': {
+    if (!dk.vest.hatch) return no('The air duct runs through the hatch — open it first.');
+    if (dk.air.fan) return no('Stop the fan before pulling the duct.');
+    dk.air.duct = !dk.air.duct;
+    return say(dk.air.duct ? 'AIR DUCT INSTALLED · 200 mm trunk through the hatchway, fan off.'
+                           : 'AIR DUCT REMOVED.', 'key');
+  }
+  case 'FAN': {
+    if (!dk.air.duct) return no('No duct installed.');
+    dk.air.fan = !dk.air.fan;
+    return say(dk.air.fan ? 'CIRCULATION FAN RUNNING · 120 L/min. The station is breathing for you now.'
+                          : 'CIRCULATION FAN STOPPED · back on your own O₂.', dk.air.fan ? 'ok' : 'warn');
+  }
+
+  /* --- propellant --- */
+  case 'LINE': {
+    if (dk.phase !== 'HARD') return no('Hard dock required.');
+    if (dk.prop.xfer) return no('Stop the transfer first.');
+    dk.prop.line = !dk.prop.line;
+    if (!dk.prop.line) { dk.prop.purge = 0; dk.prop.purged = false; }
+    return say(dk.prop.line ? 'TRANSFER LINE CONNECTED · fluid coupling mated, purging (30 s).'
+                            : 'TRANSFER LINE DISCONNECTED.', 'key');
+  }
+  case 'XFER': case 'TRANSFER': {
+    if (!dk.prop.purged) return no('The line is not purged — connect it and let the purge finish.');
+    if (!dk.pwr.tie) return no('The transfer pumps run off the station bus — close the bus tie first.');
+    if (dk.prop.xfer) { dk.prop.xfer = false; dk.prop.done = true;
+      say(`TRANSFER STOPPED · ${dk.prop.moved.toFixed(1)} kg aboard.`, 'key'); checkObjectives(); return; }
+    if (S.craft.fuel >= S.craft.fuelMax - 0.01 && S.craft.rcs >= S.craft.rcsMax - 0.01) {
+      dk.prop.done = true; checkObjectives();
+      return say('TANKS ALREADY FULL · coupling verified, nothing to transfer.', 'ok');
+    }
+    dk.prop.xfer = true;
+    return say('TRANSFER RUNNING · 0.5 kg/s into the main tank, then RCS.', 'ok');
+  }
+
+  default: return no('Usage: DOCK AUTO|RETRACT|LATCH|UNDOCK · EQUALISE|LEAK|HATCH · UMB|TIE · DUCT|FAN · LINE|XFER');
+  }
 }
 </script>
 
@@ -1978,8 +2543,11 @@ const MISSIONS = [
   brief:[
     'Station {CERES} holds a circular orbit at {400 km}. You are 100 km below it and trailing.',
     'Chasing directly does not work: thrusting toward the station raises your orbit, which {slows you down}. A lower orbit is a faster orbit — so you catch up by staying low, then climb once the phase angle is right.',
-    'Close to within 20 m at under 0.30 m/s to capture. Your RCS holds about {22 m/s} — spend it carefully.'],
-  hint:'TGT STATION  →  PLAN RDV',
+    'CERES keeps one face toward Earth and its docking port faces {aft}, so the approach runs up its velocity vector from behind. On that line you are in the same orbit as the station and you stay put for free.',
+    'Capture is earned, not given: down the axis, inside {0.10 m} of centre, under {0.15 m/s}, nose within {4°}. Then retract the ring, close the latches, and connect air, power, ECLSS and propellant.',
+    'This one is hand-flown — there is no AUTO DOCK on this vehicle. Your RCS holds about {26 m/s}.'],
+  hint:'TGT STATION  →  PLAN RDV  →  HOLD DOCK',
+  noAuto:true,
   setup(){ rig({name:'AURIGA-3', dry:2600, fuel:700, thrust:18, isp:311, rcs:40, rcsIsp:220, crew:2, o2:520});
     setOrbit('EARTH', 300, 300, 0, 0);
     S.objects = [ makeStation('EARTH', 400, 25) ];
@@ -1987,10 +2555,9 @@ const MISSIONS = [
     S.power.battMax = 900; S.power.batt = 900; S.power.area = 18; },
   obj:[
     { text:'Match orbits — range under 30 km', check:(s,d)=>{ const t=targetRel(); return t && V.len(t.r) < 30; } },
-    { text:'Soft capture — 20 m at under 0.30 m/s', check:(s,d)=>{ const t=targetRel(); if(!t) return false;
-        const rg=V.len(t.r)*1000, rel=V.len(t.v)*1000;
-        const lat=Math.abs(V.crs(V.unit(t.r),t.v))*1000;
-        return rg < 20 && rel < 0.30 && lat < 0.10; } },
+    { text:'Soft capture at the docking port', check:(s)=> s.dock.phase !== 'FREE' },
+    { text:'Hard dock — ring retracted, 12 latches closed', check:(s)=> s.dock.phase === 'HARD' },
+    { text:'Connect air, power, ECLSS and propellant', check:()=> utilitiesDone() },
   ]
 },
 {
@@ -2093,10 +2660,12 @@ const MISSIONS = [
   id:0, code:'FREE', name:'FREE FLIGHT',
   brief:[
     'No objectives. Full tanks, {200 km} Earth orbit, the Moon three days away and the whole system open.',
+    'Station {CERES} is up at {400 km} and will take a docking: TGT STATION, PLAN RDV, then DOCK. AUTO DOCK is fitted to this vehicle, and the station will refuel you once you are hard docked.',
     'Everything the missions teach works here. PLAN will solve any maneuver you ask it for.'],
-  hint:'PLAN XFER MOON · PLAN ESC · TGT MARS',
+  hint:'PLAN XFER MOON · TGT STATION → PLAN RDV · PLAN ESC',
   setup(){ rig({name:'TESTBED', dry:2500, fuel:20000, thrust:60, isp:340, rcs:200, crew:1, o2:9000});
     setOrbit('EARTH', 200, 200, 0, 0);
+    S.objects = [ makeStation('EARTH', 400, 25) ];
     S.power.battMax = 4000; S.power.batt = 4000; S.power.area = 60; },
   obj:[]
 },
@@ -2108,7 +2677,9 @@ function loadMission(id) {
   S.t = 0; S.warp = 0; S.burn = null; S.sched = null; S.objects = [];
   S.target = null; S.status = 'flight';
   S.att = { theta: 0, rate: 0, mode: 'PRO', inertial: 0, slewing: false };
-  S.aligning = false;
+  S.dock = freshDock();
+  S.power.tie = 0;
+  S.aligning = false; S.warnedProx = false;
   S.completed = false; S.pauseAfterBurn = false;
   S.solution = null; S.burnSel = { dir:'PRO', at:'AP', dur:0 };
   S.landingAllowed = false; S.thermLimit = 800;
@@ -2466,6 +3037,15 @@ function armSolution() {
   gotoPage('BURN');
 }
 function planThen(fn) { return () => { fn(); if (S.solution) gotoPage('PLANR'); }; }
+
+/* ---- docking display helpers ---- */
+const DPHASE = { FREE:'FREE FLIGHT', SOFT:'SOFT CAPTURE', RETRACT:'RING RETRACTING',
+                 RETRACTED:'RING HOME', LATCHING:'LATCHES DRIVING', HARD:'HARD DOCK' };
+/** A ten-segment bar. Narrow characters only — this has to fit a 375 px phone. */
+const gauge = (f) => { const n = Math.max(0, Math.min(10, Math.round((f || 0)*10)));
+  return '[' + '='.repeat(n) + '·'.repeat(10-n) + ']'; };
+/** ok inside the clean band, amber in the marginal one, red past the limit. */
+const band = (v, clean, max) => v <= clean ? 'ok' : v <= max ? 'go' : 'bad';
 function numFromScratch(what) {
   const v = eatScratch();
   const n = parseFloat(v);
@@ -2493,7 +3073,7 @@ ORB: { count: () => 2, title: (i) => i ? 'ORBIT' : 'ORBIT',
       r: F('True anomaly', (D.e.nu*180/Math.PI).toFixed(1) + '°') },
     { l: F('V-circular', fmtVel(vCirc(soiBody().mu, D.e.r))), r: F('V-escape', fmtVel(Math.sqrt(2*soiBody().mu/D.e.r))) },
     { l: F('Vertical rate', fmtVel(D.e.vr)), r: F('Direction', D.e.dir > 0 ? 'PROGRADE' : 'RETROGRADE') },
-    { l: F('Attitude hold', ATTNAME[S.att.mode] || S.att.mode, 'ok'),
+    { l: F('Attitude hold', attLabel(), 'ok'),
       r: F('Pointing error', (attError()*180/Math.PI).toFixed(2) + '°' + (S.att.slewing ? '  SLEWING' : ''),
            S.att.slewing ? 'go' : 'ok') },
     { l: F('SOI radius', isFinite(soiBody().soi) ? fmtDist(soiBody().soi) : '——'),
@@ -2595,43 +3175,179 @@ TGT: Object.assign(one('TARGET'), {
     ];
   } }),
 
-DOCK: Object.assign(one('PROXIMITY OPS'), {
-  sub: () => S.target || 'NO TARGET',
-  build: () => {
-    const t = targetRel();
-    if (!t) return [{ full: F('', 'NO TARGET SELECTED', 'dim') },
-                    { full: F('', 'SELECT ONE ON THE TARGET PAGE', 'dim') }, {}, {},
-                    {}, { l: NAV('<MENU', 'MENU'), r: NAV('TARGET>', 'TGT') }];
-    const rng = V.len(t.r), closing = -V.dot(V.unit(t.r), t.v);
-    const lat = Math.abs(V.crs(V.unit(t.r), t.v));
-    const pulse = (mode, amt) => () => exec(`TRANS ${mode} ${amt}`);
-    const eta = closing > 1e-6 ? rng/closing : Infinity;
-    return [
-      { l: F('Range', rng < 1 ? (rng*1000).toFixed(1) + ' m' : fmtDist(rng), rng*1000 < 20 ? 'ok' : ''),
-        r: F('Closing rate', fmtVel(closing), closing > 0 ? 'ok' : 'go') },
-      { l: F('Lateral rate', fmtVel(lat), lat*1000 > 0.1 ? 'go' : 'ok'),
-        r: F('Contact in', isFinite(eta) ? fmtT(eta) : '——') },
-      { l: F('0.10 m/s', '<TOWARD', 'sel', pulse('TGT', 0.1)),
-        r: F('0.10 m/s', 'AWAY>', 'sel', pulse('AWAY', 0.1)) },
-      { l: F('0.05 m/s', '<PORT', 'sel', pulse('PORT', 0.05)),
-        r: F('0.05 m/s', 'STBD>', 'sel', pulse('STBD', 0.05)) },
-      { l: F('', '<NULL RELATIVE*', 'go', () => exec('TRANS NULL')),
-        r: F('RCS ΔV', fmtDV(rcsDV())) },
-      { full: F('Approach profile',
-          'Hold closing rate near range in metres divided by 100. Capture gate is 20 m at under 0.30 m/s closing and 0.10 m/s lateral. NULL RELATIVE cancels all relative motion in one pulse — expensive, but it recovers a bad approach.', 'body'), wrap: true },
-      { l: NAV('<MENU', 'MENU'), r: NAV('TARGET>', 'TGT') },
+/* ---- proximity and docking -------------------------------------------- */
+DOCK: Object.assign({ count: () => 2, title: (i) => i ? 'CAPTURE' : 'PROXIMITY OPS' }, {
+  sub: () => S.dock.phase !== 'FREE' ? DPHASE[S.dock.phase] : (S.target || 'NO TARGET'),
+  build: (pg) => {
+    const dk = S.dock, g = dockGeom(), t = targetRel();
+    const foot = { l: NAV('<MENU', 'MENU'), r: NAV('UTILITIES>', 'UTIL') };
+
+    if (pg === 1) {
+      if (dk.phase === 'FREE') return [
+        { l: F('Interface', 'NOT CAPTURED', 'dim'), r: F('Attempts', String(dk.attempts)) },
+        { l: F('Bounces', String(dk.bounces), dk.bounces ? 'go' : ''), r: F('', '') },
+        { full: F('Capture envelope',
+            `Closing under ${DOCK_ENV.closeMax.toFixed(2)} m/s · within ${DOCK_ENV.latMax.toFixed(2)} m of centre · lateral rate under ${DOCK_ENV.rateMax.toFixed(2)} m/s · nose within ${DOCK_ENV.alignMax}°. Inside ${DOCK_ENV.alignClean}° and ${DOCK_ENV.latClean.toFixed(2)} m it is a clean capture; outside that it latches crooked and the ring has to pull it straight.`, 'body'), wrap: true },
+        {}, {}, foot,
+      ];
+      const soft = dk.phase === 'SOFT';
+      return [
+        { l: F('Interface', DPHASE[dk.phase], dk.phase === 'HARD' ? 'ok' : 'go'),
+          r: F('Misalignment', dk.misalign.toFixed(1) + '°', dk.misalign > 0.5 ? 'go' : 'ok') },
+        { l: F('Capture ring', gauge(dk.ring) + ' ' + (dk.ring*100).toFixed(0) + '%', dk.ring >= 1 ? 'ok' : 'go'),
+          r: F('Structural latches', Math.floor(dk.latches) + ' / 12', dk.latches >= 12 ? 'ok' : 'go') },
+        { l: soft ? F('', '<RETRACT RING*', 'go', () => exec('DOCK RETRACT'))
+                  : F('Ring', dk.phase === 'RETRACT' ? 'RETRACTING' : 'HOME', 'ok'),
+          r: dk.phase === 'RETRACTED' ? F('', 'CLOSE LATCHES*', 'go', () => exec('DOCK LATCH'))
+                                      : F('Latches', dk.phase === 'HARD' ? 'CLOSED' : 'OPEN', dk.phase === 'HARD' ? 'ok' : 'dim') },
+        { l: F('Captured at', dk.offset.toFixed(2) + ' m off centre'),
+          r: F('Attempts', `${dk.attempts}  ${dk.bounces} bounce${dk.bounces === 1 ? '' : 's'}`) },
+        { l: F('', '<UNDOCK*', 'go', () => exec('DOCK UNDOCK')),
+          r: dk.phase === 'HARD' ? NAV('UTILITIES>', 'UTIL') : F('Utilities', 'HARD DOCK FIRST', 'dim') },
+        foot,
+      ];
+    }
+
+    if (dk.phase !== 'FREE') return [
+      { l: F('Interface', DPHASE[dk.phase], 'ok'), r: F('Relative motion', 'MATED', 'ok') },
+      { full: F('', 'The vehicle is on the station. Proximity controls are inhibited — see the CAPTURE page.', 'body'), wrap: true },
+      {}, {},
+      { l: F('', '<CAPTURE PAGE', 'sel', () => { CDU.sub = 1; }), r: NAV('UTILITIES>', 'UTIL') },
+      foot,
     ];
+    if (!g) return [
+      { full: F('', t ? 'TARGET IS NOT A DOCKING PORT' : 'NO TARGET SELECTED', 'dim') },
+      { full: F('', 'Select STATION on the TARGET page.', 'body'), wrap: true },
+      {}, {},
+      { l: NAV('<TARGET', 'TGT'), r: F('', '', 'dim') },
+      foot,
+    ];
+
+    const pulse = (mode, amt) => () => exec(`TRANS ${mode} ${amt}`);
+    const off = Math.abs(g.lateral), al = Math.abs(g.align);
+    const eta = g.closing > 1e-6 ? g.axial/g.closing : Infinity;
+    const cmd = dockGuide(g, dk.leg);
+    const far = g.ctrRange > 500;
+    const rows = [
+      { l: F('Axial range', fmtRange(g.axial), g.axial < 0.5 ? 'ok' : ''),
+        r: F('Closing rate', fmtRate(g.closing), g.closing < 0 ? 'go' : band(g.closing, DOCK_ENV.closeClean, DOCK_ENV.closeMax)) },
+      { l: F('Off centre', fmtRange(g.lateral), band(off, DOCK_ENV.latClean, DOCK_ENV.latMax)),
+        r: F('Lateral rate', fmtRate(g.latRate), band(Math.abs(g.latRate), DOCK_ENV.rateClean, DOCK_ENV.rateMax)) },
+      { l: F('Nose off axis', g.align.toFixed(1) + '°', band(al, DOCK_ENV.alignClean, DOCK_ENV.alignMax)),
+        r: F('Contact in', isFinite(eta) && eta > 0 ? fmtT(eta) : '——') },
+      { l: F('0.05 m/s', '<TOWARD', 'sel', pulse('TGT', 0.05)),
+        r: F('0.05 m/s', 'AWAY>', 'sel', pulse('AWAY', 0.05)) },
+      { l: F('0.01 m/s', '<PORT', 'sel', pulse('PORT', 0.01)),
+        r: F('0.01 m/s', 'STBD>', 'sel', pulse('STBD', 0.01)) },
+      { l: F('', '<NULL RELATIVE*', 'go', () => exec('TRANS NULL')),
+        r: F('RCS ΔV', fmtDV(rcsDV()), rcsDV() < 2 ? 'bad' : 'ok') },
+      { l: S.att.mode === 'PAXS' ? F('Attitude', 'ON DOCK AXIS', 'ok')
+                                 : F('', '<HOLD DOCK AXIS', 'sel', () => exec('HOLD DOCK')),
+        r: (S.mission && S.mission.noAuto) ? F('Auto dock', 'NOT FITTED', 'dim')
+           : F('', dk.auto ? 'AUTO DOCK ON*' : 'AUTO DOCK*', dk.auto ? 'go' : 'sel', () => exec('DOCK AUTO')) },
+      { l: F('Approach leg', far ? 'RENDEZVOUS' : cmd.name, 'ok'),
+        r: F('Commanded', far ? '——' : `${cmd.vWant >= 0 ? 'close' : 'back off'} ${Math.abs(cmd.vWant).toFixed(2)}  lat ${cmd.latWant >= 0 ? '+' : ''}${cmd.latWant.toFixed(2)}`) },
+      { full: F('Flight director', far
+          ? `Station ${fmtRange(g.ctrRange)} out. Close to inside 500 m, then come onto the docking axis — it runs aft from the station, up its velocity vector. On that line you share its orbit and stay put for free.`
+          : cmd.target
+            ? `${cmd.name}: you are off the corridor, so work round to the hold point rather than across the station's face. Fly to ${fmtRange(cmd.target.axial)} astern and ${fmtRange(cmd.target.lateral)} across — ${Math.abs(cmd.vWant) < 0.005 ? 'hold the axial range' : (cmd.vWant > 0 ? 'close' : 'back off') + ' at ' + Math.abs(cmd.vWant).toFixed(2) + ' m/s'}, lateral ${cmd.latWant >= 0 ? '+' : ''}${cmd.latWant.toFixed(2)} m/s.`
+            : `${cmd.name}: hold ${cmd.vWant.toFixed(2)} m/s closing and keep it centred — ${fmtRange(off)} off at ${fmtRate(g.latRate)}, ${g.corridor.toFixed(1)}° off the axis. Capture needs under ${DOCK_ENV.closeMax.toFixed(2)} m/s, inside ${DOCK_ENV.latMax.toFixed(2)} m, nose within ${DOCK_ENV.alignMax}°.`, 'body'), wrap: true },
+      foot,
+    ];
+    return rows;
   } }),
+
+UTIL: { count: () => 4, title: () => 'UTILITIES',
+  sub: () => ['VESTIBULE', 'ELECTRICAL', 'ECLSS', 'PROPELLANT'][CDU.sub] || '',
+  build: (pg) => {
+    const dk = S.dock, foot = { l: NAV('<DOCK', 'DOCK'), r: NAV('MENU>', 'MENU') };
+    if (dk.phase !== 'HARD') return [
+      { l: F('Interface', DPHASE[dk.phase], dk.phase === 'FREE' ? 'dim' : 'go'), r: F('Utilities', 'INHIBITED', 'dim') },
+      { full: F('', 'Nothing connects until the latches are closed. Fly the approach, retract the ring, then drive the latches.', 'body'), wrap: true },
+      {}, {}, {},
+      { l: NAV('<DOCK', 'DOCK'), r: NAV('MENU>', 'MENU') },
+    ];
+    const K = (txt, cls, cmd) => F('', txt, cls, () => exec('DOCK ' + cmd));
+
+    if (pg === 0) {
+      const ve = dk.vest, p = ve.press;
+      return [
+        { l: F('Vestibule pressure', gauge(p/101.3) + ' ' + p.toFixed(1) + ' kPa', p >= 100 ? 'ok' : 'go'),
+          r: F('Equalisation valve', ve.valve ? 'OPEN' : 'CLOSED', ve.valve ? 'go' : 'dim') },
+        { l: F('Leak check', ve.leakOk ? 'PASSED' : ve.check >= 0 ? `${ve.check.toFixed(0)} / 60 s  Δ 0.0 kPa` : 'NOT RUN',
+               ve.leakOk ? 'ok' : ve.check >= 0 ? 'go' : 'dim'),
+          r: F('Hatch', ve.hatch ? 'OPEN' : 'CLOSED', ve.hatch ? 'ok' : 'dim') },
+        { l: K(ve.valve ? '<CLOSE VALVE*' : '<EQUALISE*', ve.hatch ? 'dim' : 'go', 'EQUALISE'),
+          r: ve.leakOk ? F('', '', 'dim') : K('LEAK CHECK*', p >= 100 ? 'go' : 'dim', 'LEAK') },
+        { l: K(ve.hatch ? '<CLOSE HATCH*' : '<OPEN HATCH*', ve.leakOk ? 'go' : 'dim', 'HATCH'),
+          r: F('Step', ve.hatch ? '3 of 3 COMPLETE' : ve.leakOk ? '3 of 3' : p >= 100 ? '2 of 3' : '1 of 3', ve.hatch ? 'ok' : '') },
+        { full: F('Procedure', 'Equalise to 101.3 kPa, close the valve and hold sixty seconds to prove the seal, then open the hatch. The vestibule starts at hard vacuum — the hatch will not unlock onto it.', 'body'), wrap: true },
+        foot,
+      ];
+    }
+    if (pg === 1) {
+      const pw = dk.pwr, net = D.gen + D.tie - D.load;
+      return [
+        { l: F('Umbilical', pw.umb ? 'MATED' : 'DEMATED', pw.umb ? 'ok' : 'dim'),
+          r: F('Bus tie', pw.tie ? 'CLOSED · 120 V' : 'OPEN', pw.tie ? 'ok' : 'dim') },
+        { l: F('Station supply', D.tie.toFixed(0) + ' W', D.tie ? 'ok' : 'dim'),
+          r: F('Data link', pw.tie ? 'UP' : 'DOWN', pw.tie ? 'ok' : 'dim') },
+        { l: F('Bus net', (net >= 0 ? '+' : '') + net.toFixed(0) + ' W', net < 0 ? 'go' : 'ok'),
+          r: F('Battery', (S.power.batt/S.power.battMax*100).toFixed(0) + '%', net < 0 ? 'go' : 'ok') },
+        { l: K(pw.umb ? '<DEMATE UMBILICAL*' : '<MATE UMBILICAL*', 'go', 'UMB'),
+          r: K(pw.tie ? 'OPEN BUS TIE*' : 'CLOSE BUS TIE*', pw.umb ? 'go' : 'dim', 'TIE') },
+        { full: F('Procedure', pw.tie
+            ? 'The station is carrying the load. Your battery is charging and stays charged through eclipse for as long as the tie is closed.'
+            : 'Mate the connector, then close the tie contactor. The station bus then carries the vehicle and the battery stops working for its living.', 'body'), wrap: true },
+        foot,
+      ];
+    }
+    if (pg === 2) {
+      const ai = dk.air, hrs = S.craft.crew ? S.craft.o2 / S.craft.crew : Infinity;
+      return [
+        { l: F('Air duct', ai.duct ? 'INSTALLED' : 'STOWED', ai.duct ? 'ok' : 'dim'),
+          r: F('Circulation fan', ai.fan ? 'RUNNING · 120 L/min' : 'OFF', ai.fan ? 'ok' : 'dim') },
+        { l: F('O₂ source', ai.fan ? 'STATION' : 'ONBOARD', ai.fan ? 'ok' : 'go'),
+          r: F('Onboard O₂', S.craft.crew ? fmtT(hrs*3600) : 'UNCREWED', hrs < 24 ? 'go' : 'ok') },
+        { l: K(ai.duct ? '<REMOVE DUCT*' : '<INSTALL DUCT*', dk.vest.hatch ? 'go' : 'dim', 'DUCT'),
+          r: K(ai.fan ? 'STOP FAN*' : 'START FAN*', ai.duct ? 'go' : 'dim', 'FAN') },
+        { l: F('Step', ai.fan ? '2 of 2 COMPLETE' : ai.duct ? '2 of 2' : '1 of 2', ai.fan ? 'ok' : ''),
+          r: F('Crew', S.craft.crew ? String(S.craft.crew) : 'NONE') },
+        { full: F('Procedure', dk.vest.hatch
+            ? 'The trunk runs through the open hatchway. With the fan running the station scrubs and supplies your air, and your own O₂ stops going down.'
+            : 'The duct runs through the hatch, so the hatch has to be open first — see the VESTIBULE page.', 'body'), wrap: true },
+        foot,
+      ];
+    }
+    const pr = dk.prop;
+    const fpct = S.craft.fuelMax ? S.craft.fuel/S.craft.fuelMax*100 : 0;
+    return [
+      { l: F('Transfer line', pr.line ? 'CONNECTED' : 'DISCONNECTED', pr.line ? 'ok' : 'dim'),
+        r: F('Line purge', pr.purged ? 'COMPLETE' : pr.line ? gauge(pr.purge/30) + ' ' + (pr.purge/30*100).toFixed(0) + '%' : 'NOT STARTED',
+             pr.purged ? 'ok' : pr.line ? 'go' : 'dim') },
+      { l: F('Flow', pr.xfer ? '0.500 kg/s' : '0.000 kg/s', pr.xfer ? 'ok' : 'dim'),
+        r: F('Transferred', pr.moved.toFixed(1) + ' kg', pr.done ? 'ok' : '') },
+      { l: F('Main tank', gauge(fpct/100) + ' ' + fpct.toFixed(0) + '%', fpct > 95 ? 'ok' : ''),
+        r: F('RCS', S.craft.rcs.toFixed(1) + ' / ' + S.craft.rcsMax.toFixed(0) + ' kg') },
+      { l: K(pr.line ? '<DISCONNECT LINE*' : '<CONNECT LINE*', 'go', 'LINE'),
+        r: K(pr.xfer ? 'STOP TRANSFER*' : 'START TRANSFER*', pr.purged && dk.pwr.tie ? 'go' : 'dim', 'XFER') },
+      { full: F('Procedure', pr.purged && !dk.pwr.tie
+          ? 'The transfer pumps run off the station bus — close the bus tie on the ELECTRICAL page before starting the flow.'
+          : 'Connect the coupling, let the thirty-second purge finish, then start the flow. It fills the main tank first, then RCS, and stops itself when both are full.', 'body'), wrap: true },
+      foot,
+    ];
+  } },
 
 PWR: Object.assign(one('ELECTRICAL'), {
   sub: () => D.ecl ? 'ECLIPSE' : 'SUNLIT',
   build: () => {
     const pct = S.power.batt / S.power.battMax * 100;
     const tog = (k) => () => exec(`PWR ${k} ${S.loads[k] ? 'OFF' : 'ON'}`);
-    const net = D.gen - D.load;
+    const net = D.gen + D.tie - D.load;
     return [
       { l: F('Array output', D.gen.toFixed(0) + ' W', D.ecl ? 'go' : 'ok'),
-        r: F('Bus load', D.load.toFixed(0) + ' W') },
+        r: D.tie ? F('Station tie', '+' + D.tie.toFixed(0) + ' W', 'ok')
+                 : F('Bus load', D.load.toFixed(0) + ' W') },
       { l: F('Net', (net >= 0 ? '+' : '') + net.toFixed(0) + ' W', net < 0 ? 'go' : 'ok'),
         r: F('Battery', `${pct.toFixed(0)}%`, pct < 20 ? 'bad' : pct < 50 ? 'go' : 'ok') },
       { l: F('Charge', `${S.power.batt.toFixed(0)} / ${S.power.battMax} Wh`),
@@ -2696,7 +3412,9 @@ LIFE: Object.assign(one('LIFE SUPPORT'), { sub: () => S.craft.crew ? S.craft.cre
       r: F('Cabin temperature', S.power.batt > 0 ? '21.1 °C' : '—') },
     { l: F('CO₂ scrubber', S.loads.HEAT ? 'NOMINAL' : 'OFFLINE', S.loads.HEAT ? 'ok' : 'bad'),
       r: F('Crew-hours', S.craft.o2.toFixed(0)) },
-    {}, {},
+    { l: F('O₂ source', S.dock.air.fan ? 'STATION ECLSS' : 'ONBOARD', S.dock.air.fan ? 'ok' : ''),
+      r: S.dock.phase === 'HARD' ? NAV('UTILITIES>', 'UTIL') : F('', '', 'dim') },
+    {},
     menuRow('POWER>', 'PWR'),
   ]; } }),
 
@@ -2789,7 +3507,15 @@ const HELP_PAGES = [
     ['WARP', 'WARP <rate>   or the rail arrows'],
     ['PLAN', 'PLAN CIRC AP · APO <km> · XFER <BODY>'],
     ['TRANS', 'TRANS TGT|AWAY|PORT|STBD <m/s>'],
+    ['DOCK', 'DOCK AUTO|RETRACT|LATCH|UNDOCK'],
     ['PAGES', 'Function keys below, or type the name.'],
+  ] },
+  { t: 'FLYING AN APPROACH', rows: [
+    ['CORRIDOR', 'The port faces aft. Approach up the velocity vector, from behind.', 'ok'],
+    ['WHY', 'On that line you are in the station\'s own orbit, so you hold position for free. Off it you drift.'],
+    ['RATES', 'The corridor turns with the station: sitting still in space slides you sideways across it.', 'go'],
+    ['GATE', 'Under 0.15 m/s, inside 0.25 m, nose within 10°. Half of that is a clean capture.'],
+    ['THEN', 'RETRACT the ring, close the LATCHES, then the four utility procedures on UTIL.'],
   ] },
 ];
 
@@ -2833,7 +3559,8 @@ document.getElementById('boot').addEventListener('click', () => boot());
 try {
   window.claude?.hot?.snapshot?.(() => ({
     t:S.t, soi:S.soi, r:S.r, v:S.v, mission:S.mission?.id, craft:S.craft,
-    power:S.power, therm:S.therm, objectives:S.objectives.map(o=>o.done), booted:!document.getElementById('veil').classList.contains('hidden'),
+    power:S.power, therm:S.therm, att:S.att, dock:S.dock,
+    objectives:S.objectives.map(o=>o.done), booted:!document.getElementById('veil').classList.contains('hidden'),
   }));
 } catch (e) {}
 

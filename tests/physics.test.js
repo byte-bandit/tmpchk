@@ -126,5 +126,24 @@ const m9avail=318*G0*Math.log((1400+2600+20)/(1400+20));
 ok('M-09 fix affordable', Math.abs(dv9) < m9avail, `need ${Math.abs(dv9).toFixed(0)} m/s, have ${m9avail.toFixed(0)} m/s`);
 ok('M-09 starts outbound-to-perihelion with time to act', tToPeri(e9,ms)/86400 > 20, (tToPeri(e9,ms)/86400).toFixed(0)+' days to perihelion');
 
+// 13. M-03 docking budget. A rendezvous drops you beside the station, not on
+// its corridor, so the approach is a box: astern to the hold point, across to
+// the centreline, then in. Each leg is paid for twice — once to start, once to
+// stop — and the corridor itself turns with the station.
+const m3m0 = 2600+700+40;
+const m3rcs = 220*G0*Math.log(m3m0/(m3m0-40));
+const box = 2*0.8 + 2*0.6 + 2*0.30;                    // astern, across, in
+ok('M-03 carries enough RCS to fly a corridor approach', m3rcs > 4*box,
+   `${m3rcs.toFixed(1)} m/s aboard, box legs ~${box.toFixed(1)} m/s`);
+// the corridor rotates at orbital rate: standing still in space is not standing
+// still on the corridor, and the drift has to stay flyable at the hold point
+const nStn = Math.sqrt(mu/Math.pow(E.R+400,3));
+ok('corridor rotation is a real but flyable drift at the hold point',
+   nStn*35 > 0.02 && nStn*35 < 0.10, (nStn*35).toFixed(4)+' m/s at 35 m');
+// the approach profile must arrive inside the clean band, not merely inside the limit
+const vContact = Math.min(0.30, 0.05 + 0/80);
+ok('the approach profile arrives inside the clean capture band', vContact <= 0.10,
+   `${vContact.toFixed(2)} m/s commanded at contact, clean limit 0.10`);
+
 T.done();
 

@@ -1,6 +1,6 @@
 const { boot, suite } = require('./harness');
 const G = boot();
-const { exec, loadMission, advance, derive, BODIES, AU, TAU, V, targetRel,
+const { exec, loadMission, advance, derive, BODIES, AU, TAU, V, targetRel, dockGeom,
         fmtMET, fmtT, propagate, elements, setOrbit, vCirc, vAtR,
         tToPeri, tToApo, normAngle, absState, bodyStateInParent } = G;
 const S = G.S;
@@ -101,20 +101,61 @@ let g5b=0; while(g5b++<800000 && S.status==='flight' && (S.sched||S.burn)) advan
 const t3=targetRel();
 ok('arrived near the station', t3 && V.len(t3.r) < 60,
    t3?('range '+V.len(t3.r).toFixed(2)+' km  relV '+(V.len(t3.v)*1000).toFixed(1)+' m/s'):'lost');
-// final approach on RCS
+
+/* The terminal approach is flown by the vehicle's own guidance law. M-03 does
+ * not offer the AUTO DOCK key to the player, so the test drives dockGuide()
+ * directly: same control law, exercised step by step. There is deliberately no
+ * second controller here to drift out of step with the one that ships. */
 if (t3 && V.len(t3.r) < 60) {
+  const g0 = dockGeom();
+  ok('rendezvous leaves the vehicle OFF the corridor', g0.axial < 0 || Math.abs(g0.lateral) > 10,
+     `${g0.axial.toFixed(1)} m astern, ${g0.lateral.toFixed(1)} m across, ${g0.corridor.toFixed(0)}° off axis`);
+  exec('WARP 1'); exec('HOLD DOCK');
+  const rcs0 = G.rcsDV(), tStart = S.t;
+  const legs = [];
   let n=0;
-  while(n++<4000 && S.status==='flight'){
-    const t=targetRel(); if(!t) break;
-    const rng=V.len(t.r)*1000, rel=V.len(t.v)*1000;
-    const closing=-V.dot(V.unit(t.r),t.v)*1000;
-    if(rng<20 && rel<0.30) break;
-    if(rel>0.05 && (closing<0 || closing > Math.max(0.25, rng/100))) exec('TRANS NULL');
-    else if(rng>25) exec('TRANS TGT '+Math.min(2, Math.max(0.12, rng/140)).toFixed(3));
-    for(let q=0;q<40;q++) advance(1);
+  while(n++<20000 && S.status==='flight' && S.dock.phase==='FREE'){
+    const q = dockGeom(); if(!q) break;
+    const c = G.dockGuide(q, S.dock.leg);
+    if (legs[legs.length-1] !== c.leg) legs.push(c.leg);
+    if (G.attError() < 2*Math.PI/180) {
+      if (c.axial)   G.rcsPulse(V.mul(q.axis, -Math.sign(c.axial)),   Math.abs(c.axial));
+      if (c.lateral) G.rcsPulse(V.mul(q.lat,   Math.sign(c.lateral)), Math.abs(c.lateral));
+    }
+    advance(2);
   }
-  const tf=targetRel();
-  ok('docked', S.objectives[1].done, tf?('range '+(V.len(tf.r)*1000).toFixed(1)+' m  rel '+(V.len(tf.v)*1000).toFixed(3)+' m/s  RCS left '+S.craft.rcs.toFixed(1)+' kg'):'-');
-  ok('M-03 complete', S.completed);
+  const mins = (S.t-tStart)/60, spent = rcs0 - G.rcsDV();
+  ok('the guidance law flies a box round onto the axis', legs.join('>').includes('CENTRE'), legs.join(' > '));
+  ok('soft capture', S.dock.phase!=='FREE', `after ${mins.toFixed(1)} min, ${S.dock.bounces} bounce(s)`);
+  ok('and it is a clean one', S.dock.misalign < 4 && S.dock.offset < 0.10,
+     `${S.dock.misalign.toFixed(2)}° off axis, ${S.dock.offset.toFixed(3)} m off centre`);
+  ok('approach fits the 5-8 minute budget', mins < 10, mins.toFixed(1)+' min');
+  ok('approach fits the RCS budget', spent < rcs0*0.5,
+     `spent ${spent.toFixed(2)} m/s of ${rcs0.toFixed(2)}, ${G.rcsDV().toFixed(2)} left`);
+
+  // hard dock
+  exec('DOCK RETRACT');
+  let h=0; while(h++<4000 && S.dock.phase!=='RETRACTED') advance(1);
+  exec('DOCK LATCH');
+  h=0; while(h++<4000 && S.dock.phase!=='HARD') advance(1);
+  ok('ring retracts and the latches close', S.dock.phase==='HARD' && S.dock.latches===12,
+     `${S.dock.phase}  ${S.dock.latches}/12  misalign ${S.dock.misalign.toFixed(2)}°`);
+  ok('hard dock meets objective 3', S.objectives[2].done);
+
+  // utilities, in order
+  exec('DOCK EQUALISE');
+  h=0; while(h++<4000 && S.dock.vest.press < 101) advance(1);
+  exec('DOCK LEAK');
+  h=0; while(h++<4000 && !S.dock.vest.leakOk) advance(1);
+  exec('DOCK HATCH');
+  exec('DOCK UMB'); exec('DOCK TIE');
+  exec('DOCK DUCT'); exec('DOCK FAN');
+  exec('DOCK LINE');
+  h=0; while(h++<4000 && !S.dock.prop.purged) advance(1);
+  exec('DOCK XFER');
+  h=0; while(h++<20000 && S.dock.prop.xfer) advance(1);
+  ok('all four utilities connect', G.utilitiesDone(),
+     `hatch ${S.dock.vest.hatch}  tie ${S.dock.pwr.tie}  fan ${S.dock.air.fan}  prop ${S.dock.prop.moved.toFixed(1)} kg`);
+  ok('M-03 complete', S.completed, `MET ${fmtMET(S.t)}  RCS left ${S.craft.rcs.toFixed(1)} kg`);
 }
 T.done();

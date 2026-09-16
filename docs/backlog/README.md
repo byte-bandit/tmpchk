@@ -6,13 +6,17 @@ constraints and open questions.
 
 | # | Item | Status | Depends on |
 |---|------|--------|-----------|
-| [01](01-docking.md) | Realistic docking — attitude phase **done**, mechanics next | In progress | — |
+| [01](01-docking.md) | Realistic docking — attitude and mechanics both **done** | Done | — |
 | [02](02-cold-start.md) | Cold start and systems configuration | Not started | — (can run in parallel) |
 | [03](03-launch.md) | Launch from Earth | Not started | 01 (attitude), 02 (pad state) |
 | [04](04-new-missions.md) | New missions | Awaiting examples | 01 / 03 per mission |
 
 Decisions taken: attitude is built inside item 01 scoped to docking's needs and
 extended when launch needs it; cold start and launch are separate items.
+
+The north star is one continuous flight in FREE FLIGHT: cold start on the pad →
+launch → rendezvous → dock. Item 01 built the last leg and it works wherever a
+station exists, not only in M-03. Items 02 and 03 are the first two legs.
 
 ## Picking up an item
 
@@ -22,7 +26,8 @@ extended when launch needs it; cold start and launch are separate items.
    does not, fix that first rather than building on a broken base.
 3. Answer the item's **Open questions** with the user before writing code. They
    are there because getting them wrong means rework, not because they are
-   interesting.
+   interesting. Bring measurements, not guesses — item 01's suggested answer to
+   its own first question turned out to be backwards.
 4. `./tests/run.sh` again before publishing. Add suites for what you built.
 
 ## How this codebase is arranged
@@ -41,7 +46,7 @@ extended when launch needs it; cold start and launch are separate items.
 | script 8 | CDU page framework, `PAGES`, input, fullscreen, main loop, boot |
 
 Tests boot the real page under a DOM stub (`tests/harness.js`) or drive it in
-Chromium (`tests/browser/`).
+Chromium (`tests/browser/`). Nine suites; `./tests/run.sh` runs the lot.
 
 ## Constraints that apply to every item
 
