@@ -1,7 +1,9 @@
-# 02 — Cold start, configuration and launch
+# 03 — Launch from Earth
 
 **Status:** not started
-**Depends on:** 00 (attitude) — a pitch program is a commanded attitude
+**Depends on:** 01 (attitude lands there) and 02 (the pad state)
+
+Split from cold start by decision; that half is now item 02.
 
 ## Where it is today
 
@@ -24,20 +26,14 @@ Every mission begins in flight with systems already running.
 > cold start, setting up and configuring all systems, launch from earth, roll
 > programs, etc…
 
-Two related but separable things:
+The launch half (cold start is item 02):
 
-**A. Cold start / configuration.** The vehicle begins dark. Power up in a
-sensible order, and the order matters: batteries before buses, buses before
-avionics, avionics before guidance, guidance needs an alignment before it can
-fly. Getting it wrong costs time or leaves a system unavailable.
-
-**B. Launch.** Sit on the pad, ignite, clear the tower, roll onto the flight
+Sit on the pad, ignite, clear the tower, roll onto the flight
 azimuth, pitch over, stage, and shut down at a target orbit. Requires physics
 the game does not have: atmospheric density, drag, dynamic pressure, thrust
 varying with ambient pressure, staging, and throttle.
 
-These are separable. A is self-contained and mostly systems modelling. B is new
-physics and is the larger of the two.
+This is the largest single piece of new physics in the backlog.
 
 ## What launch actually needs
 
@@ -58,34 +54,26 @@ physics and is the larger of the two.
 
 ## Open questions
 
-1. **Split A and B into two items?** They share only the `PRELAUNCH` state.
-   Strong suggestion: yes — cold start is a satisfying self-contained piece, and
-   launch is the biggest single piece of new physics in the backlog.
-2. **How deep does cold start go?** A dozen switches in a fixed order, or a
-   dependency graph where any valid order works? Suggest a dependency graph with
-   ~8-10 systems; it is more interesting and no harder to test.
-3. **Is a bad power-up sequence recoverable?** Suggest yes, always — it costs
-   battery and time, which is punishment enough on a limited battery.
-4. **Is the pitch program flown or scripted?** Real options: (a) the player
+1. **Is the pitch program flown or scripted?** Real options: (a) the player
    commands pitch at intervals, (b) they enter a program (altitude/pitch pairs)
    and the guidance flies it, (c) a single `LAUNCH` that flies a canned profile.
    (b) is the most authentic and the most interesting on a phone. Suggest (b),
    with (c) as a fallback for players who want to skip it.
-5. **Does ascent need drag losses to be *accurate*, or just present?** Accurate
+2. **Does ascent need drag losses to be *accurate*, or just present?** Accurate
    means ~1,500-2,000 m/s of gravity and drag losses on a real ascent, so a
    9.4 km/s launch reaches a 7.8 km/s orbit. Suggest aiming for that ballpark so
    the budget teaches something true.
-6. **Does drag apply retroactively to existing missions?** M-01 starts with
+3. **Does drag apply retroactively to existing missions?** M-01 starts with
    periapsis 900 km below the surface; with drag modelled it would now decay
    during the coast. That changes a tested trajectory. Suggest drag is only
    active below ~140 km and verifying M-01 is unaffected — it starts at 182 km.
-7. **Which missions get a launch?** Retrofitting M-01 changes the tutorial
+4. **Which missions get a launch?** Retrofitting M-01 changes the tutorial
    substantially. Suggest launch is a *new* mission ahead of M-01, leaving the
    existing ladder intact.
 
 ## Risk
 
-Question 6 is the one to watch. Adding any force to `advance()` that acts during
+Question 3 is the one to watch. Adding any force to `advance()` that acts during
 normal flight risks perturbing the nine tested missions. Drag must be strictly
 bounded by altitude, and `physics.test.js` plus `deep.test.js` must be run before
 and after to prove the existing trajectories are untouched.
@@ -96,11 +84,11 @@ used while it acts. The powered/atmospheric phase needs numeric integration
 
 ## Definition of done
 
-- A `PRELAUNCH` vehicle state that is genuinely dark.
-- Systems with real dependencies, a page to work them, and battery consequences.
 - Atmosphere, drag and max-Q, active only in the atmosphere, with the existing
   missions proven unchanged.
 - Staging and throttle.
 - A launch that reaches orbit with realistic losses.
-- New suites: cold start order, drag only below the line, a scripted ascent
-  reaching a target orbit, and all seven existing suites unchanged.
+- New suite: drag acts only below the line and existing trajectories are
+  bit-for-bit unchanged; a scripted ascent reaches a target orbit within a
+  realistic ΔV budget; staging and throttle behave.
+- All existing suites pass, with lunar and Mars arrivals unchanged.

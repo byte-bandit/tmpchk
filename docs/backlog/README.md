@@ -6,10 +6,13 @@ constraints and open questions.
 
 | # | Item | Status | Depends on |
 |---|------|--------|-----------|
-| [00](00-attitude.md) | Vehicle attitude model | Proposed — decision needed | — |
-| [01](01-docking.md) | Realistic docking and berthing | Not started | 00 |
-| [02](02-cold-start-launch.md) | Cold start, configuration and launch | Not started | 00 |
-| [03](03-new-missions.md) | New missions | Awaiting examples | 01, 02 |
+| [01](01-docking.md) | Realistic docking — **includes the attitude model as phase 0** | Next up | — |
+| [02](02-cold-start.md) | Cold start and systems configuration | Not started | — (can run in parallel) |
+| [03](03-launch.md) | Launch from Earth | Not started | 01 (attitude), 02 (pad state) |
+| [04](04-new-missions.md) | New missions | Awaiting examples | 01 / 03 per mission |
+
+Decisions taken: attitude is built inside item 01 scoped to docking's needs and
+extended when launch needs it; cold start and launch are separate items.
 
 ## Picking up an item
 

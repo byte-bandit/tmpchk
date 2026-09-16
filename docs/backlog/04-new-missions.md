@@ -1,7 +1,7 @@
-# 03 — New missions
+# 04 — New missions
 
 **Status:** awaiting examples from the user
-**Depends on:** 01 and 02 for anything involving docking or launch
+**Depends on:** 01 for docking missions, 03 for launch missions; others can start now
 
 ## Where it is today
 
