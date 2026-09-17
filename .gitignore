@@ -1,0 +1,2 @@
+# Agent worktrees are transient checkouts of this repo, nested inside it.
+.claude/worktrees/
