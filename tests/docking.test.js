@@ -2,7 +2,8 @@ const { boot, suite } = require('./harness');
 const G = boot();
 const { exec, loadMission, advance, derive, V, targetRel, dockGeom, dockGuide,
         dockTarget, utilitiesDone, DOCK_ENV, PORT_ARM, PORT_ARM_STN,
-        fmtRange, fmtRate, rcsDV, craftMass, makeStation, LEAK_LIMIT, LEAK_HOLD } = G;
+        fmtRange, fmtRate, rcsDV, craftMass, makeStation, LEAK_LIMIT, LEAK_HOLD,
+        jettisonStage, setOrbit } = G;
 const S = G.S;
 const out = G.lines;
 const T = suite('DOCKING');
@@ -31,6 +32,18 @@ function place({ axial, lateral = 0, closing = 0, latRate = 0, align = 0 }) {
   const dAx = -closing / 1000 - wS * lKm;
   const dLat = latRate / 1000 + wS * aKm;
   S.v = V.add(Vs, V.add(V.mul(axis, dAx), V.mul(lat, dLat)));
+  derive();
+}
+/** The vehicle as its own ascent leaves it: launcher staged away, in orbit.
+ *
+ *  The sandbox begins at sea level now, and auto dock is an orbital skill.
+ *  Flying the ascent is the launch suite's job; this suite only needs the
+ *  vehicle the ascent hands back — spacecraft stage, full tanks, no pad. */
+function orbitAfterAscent(altKm) {
+  while (jettisonStage() === null) ;   // down to the spacecraft's own stage
+  S.pad = null;
+  S.fairing = false;                  // thrown away at 140 km on the way up
+  setOrbit('EARTH', altKm, altKm, 0, 0);
   derive();
 }
 /** Run the clock until `done()`, in steps small enough for proximity work. */
@@ -309,12 +322,15 @@ const autoFld = G.CURRENT.map(r => [r.l, r.r].map(f => f ? f.lab + ' ' + f.val :
 ok('and the page says the same thing the command does', /Auto dock NOT FITTED/.test(autoFld),
    (autoFld.match(/Auto dock [A-Z ]+/) || ['none'])[0]);
 
-// Free flight starts cold and dark now, so the sandbox has to be woken up
+// Free flight starts cold and dark on the pad now, so the sandbox has to be woken up
 // before it can fly anything. PWR UP runs the real sequence at real speed.
 loadMission(0); exec('PWR UP');
 for (let i = 0; i < 900 && S.pwrUp; i++) advance(1);
 ok('free flight wakes from a cold start', G.SYSIDS.every(id => !G.sysFitted(id) || G.sysOn(id)),
    'powered up in ' + (S.t / 60).toFixed(1) + ' min');
+orbitAfterAscent(400);
+ok('and the ascent hands back the spacecraft, not the launcher',
+   S.craft.stageName === 'TESTBED' && !S.pad, `${S.craft.stageName}, ${rcsDV().toFixed(0)} m/s RCS`);
 exec('WARP 1'); exec('TGT STATION');
 ok('free flight has a station to dock with', !!dockTarget());
 place({ axial: -40, lateral: 30, closing: 0 });

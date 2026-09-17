@@ -351,14 +351,44 @@ const AU = 149597870.7;        // km
 
 /* ---- celestial bodies -------------------------------------
    `a` / `period` describe a circular orbit about `parent`.
-   `soi` is the sphere-of-influence radius used for conic patching. */
+   `soi` is the sphere-of-influence radius used for conic patching.
+
+   `atmo` is the atmospheric interface: the altitude in km above which there is
+   no air at all. It was only ever a caution threshold; it is now also the hard
+   boundary of the drag model, and that is deliberate. Below it the trajectory
+   has to be integrated numerically, because drag is not conservative and the
+   exact Kepler propagation no longer applies. Above it nothing changes, to the
+   bit — which is what keeps every flown mission where it was.
+
+   `rho0` is sea-level (surface) density in kg/m^3 and `hScale` the scale
+   height in km, for rho = rho0 exp(-h/H). `rot` is the body's rotation rate in
+   rad/s: it gives a pad its free eastward velocity, and it is what the air
+   moves at, so a vehicle sitting on the ground feels no wind.              */
 const BODIES = {
   SUN:   { name:'SUN',   mu:1.32712440018e11, R:696340, parent:null,   color:'#F2A33C', soi:Infinity },
-  EARTH: { name:'EARTH', mu:398600.4418, R:6371,   parent:'SUN',   a:AU,          period:3.15581e7, phase0:1.10, soi:924000,  color:'#3FA9C9', atmo:140 },
-  MOON:  { name:'MOON',  mu:4902.800,    R:1737.4, parent:'EARTH', a:384400,      period:2.360591e6, phase0:0.40, soi:66100,  color:'#8A93A3' },
-  VENUS: { name:'VENUS', mu:324858.6,    R:6051.8, parent:'SUN',   a:0.72333*AU,  period:1.94141e7, phase0:4.10, soi:616000,  color:'#D8B26A', atmo:250 },
-  MARS:  { name:'MARS',  mu:42828.37,    R:3389.5, parent:'SUN',   a:1.52366*AU,  period:5.93554e7, phase0:4.6407, soi:577000,  color:'#C2603F', atmo:110 },
+  EARTH: { name:'EARTH', mu:398600.4418, R:6371,   parent:'SUN',   a:AU,          period:3.15581e7, phase0:1.10, soi:924000,  color:'#3FA9C9', atmo:140,
+           rho0:1.225, hScale:8.5,  rot:7.2921159e-5 },
+  MOON:  { name:'MOON',  mu:4902.800,    R:1737.4, parent:'EARTH', a:384400,      period:2.360591e6, phase0:0.40, soi:66100,  color:'#8A93A3', rot:2.6617e-6 },
+  VENUS: { name:'VENUS', mu:324858.6,    R:6051.8, parent:'SUN',   a:0.72333*AU,  period:1.94141e7, phase0:4.10, soi:616000,  color:'#D8B26A', atmo:250,
+           rho0:65.0,  hScale:15.9, rot:-2.9924e-7 },
+  MARS:  { name:'MARS',  mu:42828.37,    R:3389.5, parent:'SUN',   a:1.52366*AU,  period:5.93554e7, phase0:4.6407, soi:577000,  color:'#C2603F', atmo:110,
+           rho0:0.020, hScale:11.1, rot:7.088e-5 },
 };
+
+/* ---- atmosphere -------------------------------------------
+   Exponential and isothermal: cheap, and within a factor of two of the real
+   thing everywhere it matters. Both functions return exactly zero above the
+   interface and for a body with no air, so every call site can add their
+   contribution unconditionally and change nothing in vacuum.               */
+function airDensity(b, altKm) {                 // kg/m^3
+  if (!b.rho0 || !(altKm < b.atmo)) return 0;
+  return b.rho0 * Math.exp(-Math.max(0, altKm) / b.hScale);
+}
+/** Ambient pressure as a fraction of the body's surface pressure, 0..1. */
+function airPressure(b, altKm) {
+  if (!b.rho0 || !(altKm < b.atmo)) return 0;
+  return Math.exp(-Math.max(0, altKm) / b.hScale);
+}
 const CHILDREN = {};
 for (const k in BODIES) {
   const p = BODIES[k].parent;
@@ -546,6 +576,11 @@ const S = {
   // Which systems are running. A mission declares its own starting set; a
   // warm one simply starts with all of them ON. See SYSTEMS below.
   sys: {}, pwrUp: false, aligning: false,
+  // Throttle is a general capability, not a launch-only one: it scales the
+  // engine everywhere, the solver plans at whatever it is set to, and it
+  // starts at 1 so a mission that never touches it burns exactly as it always
+  // did. `pad` is null except on a vehicle that has not lifted off yet.
+  throttle: 1, pad: null, fairing: false,
 };
 
 /* ---- docking state ----------------------------------------------------
@@ -757,11 +792,129 @@ function alignLeft() {
 }
 
 const craftMass = () => S.craft.dry + S.craft.fuel + S.craft.rcs;
+const soiBody = () => BODIES[S.soi];
+
+/* ---- throttle, ambient pressure and the engine it feeds -----------------
+   Three things can now scale the engine: the throttle, the stage that is
+   lit, and the air pressure around the nozzle. All three collapse to nothing
+   on a vehicle that declares none of them:
+     - `S.throttle` is 1 unless somebody set it, and x*1 === x exactly;
+     - `thrustSL`/`ispSL` exist only on a stage built to fly through air, so
+       everything else returns its own `thrust` and `isp` untouched;
+     - above the atmospheric interface the pressure fraction is exactly 0,
+       which is where every shipped mission burns.
+   That is why the arrival geometry of nine flown missions does not move.   */
+function ambientFrac() {
+  const b = soiBody();
+  if (!b.rho0) return 0;
+  return airPressure(b, V.len(S.r) - b.R);
+}
+/** Engine thrust right now, kN — stage, throttle and back-pressure included. */
+function curThrust() {
+  const c = S.craft;
+  const t = c.thrustSL != null ? c.thrustSL + (c.thrust - c.thrustSL) * (1 - ambientFrac()) : c.thrust;
+  return t * S.throttle;
+}
+/** Specific impulse right now, s. A first stage loses ~10% of it at the pad. */
+function curIsp() {
+  const c = S.craft;
+  return c.ispSL != null ? c.ispSL + (c.isp - c.ispSL) * (1 - ambientFrac()) : c.isp;
+}
+/** Propellant flow at the current throttle, kg/s. */
+const curFlow = () => curThrust() * 1000 / (curIsp() * G0);
+
 const dvRemaining = () => {
   const m0 = craftMass(), m1 = m0 - S.craft.fuel;
   return m1 <= 0 ? 0 : S.craft.isp * G0 * Math.log(m0/m1);   // m/s
 };
-const soiBody = () => BODIES[S.soi];
+
+/* ---- staging ------------------------------------------------------------
+   A stack is a list of stages, each with its own dry mass, propellant, thrust
+   and Isp; `payload` is what is left when the last of them is gone. Only the
+   lit stage's numbers live in `S.craft`, so every existing formula — mass,
+   flow, ΔV remaining, the solver — reads what it always read. The mass of the
+   stages still above the lit one is carried in `S.craft.dry`, which is exactly
+   what they are from the lit engine's point of view: dead weight.
+
+   Vehicles without a stack have `stages` undefined and never touch any of it. */
+function loadStage(i) {
+  const c = S.craft, st = c.stages[i];
+  let upper = 0;
+  for (let k = i + 1; k < c.stages.length; k++) upper += c.stages[k].dry + c.stages[k].fuel;
+  c.stageIx = i;
+  c.dry = c.payload + st.dry + upper;
+  c.fuel = st.fuel; c.fuelMax = st.fuel;
+  c.thrust = st.thrust; c.isp = st.isp;
+  c.thrustSL = st.thrustSL != null ? st.thrustSL : null;
+  c.ispSL = st.ispSL != null ? st.ispSL : null;
+  c.cda = st.cda != null ? st.cda : c.cdaPayload;
+  c.qMax = st.qMax != null ? st.qMax : Infinity;
+  c.stageName = st.name;
+}
+/** Jettison the lit stage. Whatever is left in its tanks goes with it. */
+function jettisonStage() {
+  const c = S.craft;
+  if (!c.stages || c.stageIx == null) return 'This vehicle has no stages to drop.';
+  if (c.stageIx >= c.stages.length - 1) return 'Last stage — this is the spacecraft itself.';
+  const spent = c.stages[c.stageIx];
+  const lost = spent.dry + Math.max(0, c.fuel);
+  // Staging in the middle of an ascent is one event, not two: separation and
+  // the next ignition. The first stage is usually already dry when the player
+  // presses the key — the cutoff is what tells them to — so "still ascending"
+  // cannot mean "the engine is still lit"; it means the ascent is not over.
+  // Anywhere else this is just jettison, and nothing lights.
+  const ascending = !!(S.burn && S.burn.ascent) || !!(S.pad && S.pad.lifted && !S.pad.meco);
+  c.stages[c.stageIx].fuel = 0;
+  if (S.burn) endBurn(ascending ? 'STAGING' : 'MECO — staging', 'key');
+  loadStage(c.stageIx + 1);
+  S.ledger.stages = (S.ledger.stages || 0) + 1;
+  say(`STAGE SEPARATION · ${spent.name} away, ${lost.toFixed(0)} kg gone. `
+    + `${c.stageName} is live: ${(curThrust()*1000).toFixed(0)} N on ${craftMass().toFixed(0)} kg.`, 'key');
+  if (ascending && c.fuel > 0 && !c.stages[c.stageIx].spacecraft) {
+    S.burn = { dir: 'INRT', left: Infinity, total: Infinity, ascent: true };
+    say('SECOND STAGE IGNITION · guidance still has the pitch program.', 'key');
+  }
+  return null;
+}
+
+/* ---- drag ---------------------------------------------------------------
+   F = ½ ρ v² Cd·A, opposing the velocity RELATIVE TO THE AIR. The air turns
+   with the body, which is not a detail: a vehicle standing on the pad is doing
+   465 m/s in the inertial frame this simulation works in, and charging it with
+   465 m/s of wind would be nonsense.                                        */
+const ZEROV = { x:0, y:0 };
+/** Velocity relative to the co-rotating atmosphere, km/s. */
+function airRelative(rv, vv, b) {
+  const w = b.rot || 0;
+  return { x: vv.x + w * rv.y, y: vv.y - w * rv.x };
+}
+/** Drag acceleration in km/s², or exactly zero where there is no air. */
+function dragAcc(rv, vv, mass) {
+  const b = soiBody();
+  const rho = airDensity(b, V.len(rv) - b.R);
+  if (rho <= 0) return ZEROV;
+  const cda = S.craft.cda || 0;
+  if (cda <= 0) return ZEROV;
+  const rel = airRelative(rv, vv, b);
+  const vm = V.len(rel);
+  if (vm <= 1e-12) return ZEROV;
+  const vms = vm * 1000;
+  const a = 0.5 * rho * vms * vms * cda / Math.max(mass, 1);     // m/s²
+  return V.mul(rel, -a / 1000 / vm);                              // km/s², along -v̂
+}
+/** Dynamic pressure on the vehicle right now, Pa. Zero in vacuum. */
+function dynPressure() {
+  const b = soiBody();
+  const rho = airDensity(b, V.len(S.r) - b.R);
+  if (rho <= 0) return 0;
+  const vms = V.len(airRelative(S.r, S.v, b)) * 1000;
+  return 0.5 * rho * vms * vms;
+}
+/** True while the vehicle is inside an atmosphere, where Kepler does not hold. */
+function inAtmosphere() {
+  const b = soiBody();
+  return !!b.rho0 && (V.len(S.r) - b.R) < b.atmo;
+}
 const el = () => elements(S.r, S.v, soiBody().mu);
 
 /* ---- derived telemetry, recomputed each frame -------------- */
@@ -783,8 +936,9 @@ function derive() {
     ecl = along < 0 && perp < b.R;
   }
   // Stowed arrays generate nothing, sunlit or not — deployment is a step in
-  // the power-up, not scenery.
-  const gen = (ecl || !sysOn('ARRAY')) ? 0 : flux * S.power.area * S.power.eff;
+  // the power-up, not scenery. Nor does anything come through a fairing: on
+  // the pad and all the way up, the battery is the only source there is.
+  const gen = (ecl || S.fairing || !sysOn('ARRAY')) ? 0 : flux * S.power.area * S.power.eff;
   // Tied to the station, its bus carries the vehicle and the battery stops
   // working. This is the visible payoff of the power hookup.
   const tie = S.dock.pwr.tie ? (S.craft.stationSupply || 2000) : 0;
@@ -808,8 +962,14 @@ function derive() {
 
   const earth = absState('EARTH', S.t).r;
   const dEarth = V.len(V.sub(V.add(sunR, S.r), earth));
+  const q = dynPressure();
   return D = {
     e, b, alt, dSun, flux, ecl, gen, load, tie,
+    q, rho: airDensity(b, alt),
+    // airspeed is what drag and heating see: the air turns with the planet
+    vAir: V.len(airRelative(S.r, S.v, b)),
+    twr: craftMass() > 0 ? curThrust() * 1000 / (craftMass() * G0) : 0,
+    pitch: S.pad ? currentPitch() : null,
     dEarth, lightTime: dEarth / 299792.458,
     apoAlt: e.ra === Infinity ? Infinity : e.ra - b.R,
     perAlt: e.rp - b.R,
@@ -820,6 +980,8 @@ function derive() {
 }
 
 /* ---- power / thermal integration --------------------------- */
+/** Effective nose radius, m. Bluntness is what a heat shield buys you. */
+const HEAT_NOSE = 4;
 function stepSystems(dt) {
   const net = (S.power.gen + S.power.tie - S.power.load) * dt / 3600;   // Wh
   S.power.batt = Math.max(0, Math.min(S.power.battMax, S.power.batt + net));
@@ -842,8 +1004,29 @@ function stepSystems(dt) {
     S.craft.o2 = Math.max(0, S.craft.o2 - S.craft.crew * rate * dt / 3600);
   }
   // radiative equilibrium, relaxed
-  const eq = Math.pow(Math.max(D.flux,1) * 0.28 / (4 * 5.670374e-8 * 0.85), 0.25) - 273.15;
-  const k = 1 - Math.exp(-dt / 5400);
+  let eq = Math.pow(Math.max(D.flux,1) * 0.28 / (4 * 5.670374e-8 * 0.85), 0.25) - 273.15;
+  let tau = 5400;
+  // Air does what sunlight cannot. Convective heating at the stagnation point
+  // goes as sqrt(rho)·v³ (Sutton-Graves), which is why entry speed matters so
+  // much more than entry density: half the speed is an eighth of the heating.
+  // The hull follows it on a minute's time constant rather than an hour and a
+  // half — an entry is over in five minutes, and a lag of 5400 s would let a
+  // vehicle sail through a fireball without noticing it.
+  //
+  // In vacuum q is exactly zero, this whole block is skipped, and the line
+  // below is the arithmetic that was here before, unchanged.
+  // A launch vehicle climbs inside a fairing, and the fairing is the thing
+  // that gets hot: it is thrown away before it matters. That is the whole
+  // asymmetry between going up and coming down — on the way up the vehicle is
+  // shielded and the air is behind it in four minutes; on the way down it is
+  // bare, and this is what kills it.
+  if (D.q > 0 && D.rho > 0 && !S.fairing) {
+    const vms = D.vAir * 1000;
+    const qdot = 1.7415e-4 * Math.sqrt(D.rho / HEAT_NOSE) * vms * vms * vms;    // W/m²
+    const aero = Math.pow(qdot / (0.85 * 5.670374e-8), 0.25) - 273.15;
+    if (aero > eq) { eq = aero; tau = 45; }
+  }
+  const k = 1 - Math.exp(-dt / tau);
   S.therm.hull += (eq - S.therm.hull) * k;
 }
 
@@ -1319,37 +1502,53 @@ function setAttMode(mode, inertial) {
   if (mode === 'INRT' && inertial != null) S.att.inertial = inertial;
 }
 
-/** Numerically integrate one substep while the main engine is lit. */
+/** Numerically integrate one substep under thrust, drag, or both.
+ *
+ *  This is the non-conservative path. The engine has always needed it; drag
+ *  needs it too, because a dissipative force breaks the exact two-body
+ *  propagation the rest of the clock runs on. Outside an atmosphere the drag
+ *  term is not merely small — `dragAcc` returns a shared zero vector and the
+ *  addition is skipped entirely, so a vacuum burn is evaluated by the same
+ *  arithmetic in the same order as before this existed.                     */
 function burnStep(dt) {
   const b = soiBody(), mu = b.mu;
   const m = craftMass();
   // An engine does not fire until the vehicle is pointed. The burn clock stops
   // while it turns, so a commanded duration is always a duration of thrust.
-  if (attError() > ALIGN_TOL) { S.aligning = true; return; }
-  S.aligning = false;
+  //
+  // An ascent is the exception: a launch vehicle pitches over THROUGH the
+  // burn, so the guidance is always a little ahead of the nose and thrust
+  // simply comes out of wherever the nose currently is, as it does in life.
+  if (S.burn && !S.burn.ascent && attError() > ALIGN_TOL) { S.aligning = true; return; }
+  if (S.burn) S.aligning = false;
+  const lit = !!S.burn && S.craft.fuel > 0;
   const dirv = thrustDir();
-  const aT = S.craft.fuel > 0 ? S.craft.thrust / m : 0;   // km/s^2
-  const acc = (rv) => {
+  const aT = lit ? curThrust() / m : 0;   // km/s^2
+  const acc = (rv, vv) => {
     const rr = V.len(rv);
-    return V.add(V.mul(rv, -mu/(rr*rr*rr)), V.mul(dirv, aT));
+    const g = V.add(V.mul(rv, -mu/(rr*rr*rr)), V.mul(dirv, aT));
+    const d = dragAcc(rv, vv, m);
+    return d === ZEROV ? g : V.add(g, d);
   };
   // RK4 on position/velocity
   const r0 = S.r, v0 = S.v;
-  const k1r = v0,                       k1v = acc(r0);
-  const k2r = V.add(v0, V.mul(k1v,dt/2)), k2v = acc(V.add(r0, V.mul(k1r,dt/2)));
-  const k3r = V.add(v0, V.mul(k2v,dt/2)), k3v = acc(V.add(r0, V.mul(k2r,dt/2)));
-  const k4r = V.add(v0, V.mul(k3v,dt)),   k4v = acc(V.add(r0, V.mul(k3r,dt)));
+  const k1r = v0,                       k1v = acc(r0, v0);
+  const k2r = V.add(v0, V.mul(k1v,dt/2)), k2v = acc(V.add(r0, V.mul(k1r,dt/2)), k2r);
+  const k3r = V.add(v0, V.mul(k2v,dt/2)), k3v = acc(V.add(r0, V.mul(k2r,dt/2)), k3r);
+  const k4r = V.add(v0, V.mul(k3v,dt)),   k4v = acc(V.add(r0, V.mul(k3r,dt)),   k4r);
   S.r = V.add(r0, V.mul(V.add(V.add(k1r, V.mul(k2r,2)), V.add(V.mul(k3r,2), k4r)), dt/6));
   S.v = V.add(v0, V.mul(V.add(V.add(k1v, V.mul(k2v,2)), V.add(V.mul(k3v,2), k4v)), dt/6));
 
-  if (S.craft.fuel > 0) {
-    const mdot = S.craft.thrust * 1000 / (S.craft.isp * G0);   // kg/s
+  if (lit) {
+    const mdot = curFlow();   // kg/s
     const used = Math.min(S.craft.fuel, mdot * dt);
     S.craft.fuel -= used;
     S.ledger.dvUsed += aT * 1000 * dt;
     if (S.craft.fuel <= 0) {
       S.craft.fuel = 0;
-      endBurn('MAIN ENGINE CUTOFF — propellant exhausted', 'warn');
+      endBurn((S.craft.stages && S.craft.stageIx < S.craft.stages.length - 1)
+        ? 'CUTOFF — stage propellant exhausted. STAGE, then re-ignite.'
+        : 'MAIN ENGINE CUTOFF — propellant exhausted', 'warn');
     }
   }
   if (!S.burn) return;              // cutoff above already cleared the burn
@@ -1362,9 +1561,189 @@ function endBurn(msg, cls) {
   const spent = S.burn.total - Math.max(0, S.burn.left);
   S.burn = null;
   S.ledger.burns++;
-  say(msg + ` · ${spent.toFixed(1)} s`, cls || 'ok');
+  say(msg + (isFinite(spent) ? ` · ${spent.toFixed(1)} s` : ''), cls || 'ok');
   if (S.warp !== S.preBurnWarp && S.preBurnWarp) { S.warp = S.preBurnWarp; S.preBurnWarp = null; }
   if (S.pauseAfterBurn) { S.warp = 0; S.pauseAfterBurn = false; say('CLOCK HOLD', 'sys'); }
+}
+
+/* ============================================================
+   LAUNCH — the pad, the count and the pitch program
+
+   A vehicle on the pad is not being propagated: it is standing on a rotating
+   planet, and the only thing moving it is the planet. It is still `status:
+   'flight'` for the same reason cold start is — anything else stops the clock,
+   and the clock is what runs the warm-ups, the countdown and the battery.
+
+   The pitch program is flown against the LOCAL HORIZON: each row is an
+   altitude and the pitch the vehicle should hold when it gets there, 90° being
+   straight up and 0° being flat along the direction of flight. Guidance
+   interpolates between the rows and rewrites the INRT reference every step,
+   which is exactly what INRT was built for — an angle somebody else decides.
+   ============================================================ */
+// The filed profile. Measured, not guessed: it puts this stack into a 185 km
+// orbit for 8,884 m/s with 4.5 t of second-stage propellant left and a peak
+// dynamic pressure of 35 kPa against the stack's 40 kPa design limit. There is
+// deliberately not much room in that last number — flatten the turn and you
+// will meet the limit.
+const PITCH_DEFAULT = [[0, 90], [2, 84], [10, 58], [40, 26], [130, 10]];
+const TOWER = 0.06;                 // km — clear of the pad, and of the impact check
+const COUNT_DEFAULT = 600;          // s of count a fresh pad starts with
+
+/** Put the vehicle on the pad of `body`, at surface angle `theta` radians. */
+function setPad(body, thetaDeg, opts) {
+  const o = opts || {};
+  S.soi = body;
+  S.pad = {
+    body, theta: normAngle((thetaDeg || 0) * Math.PI/180),
+    held: true, lifted: false, hold: true, T: -(o.count != null ? o.count : COUNT_DEFAULT),
+    program: (o.program || PITCH_DEFAULT).map(p => [p[0], p[1]]),
+    ignited: false, maxQ: 0, maxQalt: 0, liftT: null, meco: null, site: o.site || 'PAD',
+  };
+  S.fairing = true;
+  padPlace(0);
+}
+/** Stand the vehicle on the ground and let the planet carry it. */
+function padPlace(dt) {
+  const p = S.pad, b = BODIES[p.body], w = b.rot || 0;
+  p.theta = normAngle(p.theta + w * dt);
+  const R = b.R;
+  S.r = { x: R * Math.cos(p.theta), y: R * Math.sin(p.theta) };
+  S.v = { x: -w * R * Math.sin(p.theta), y: w * R * Math.cos(p.theta) };
+}
+/** Commanded pitch from the program, degrees above the local horizon. */
+function pitchCommand(altKm) {
+  const pr = S.pad && S.pad.program;
+  if (!pr || !pr.length) return 90;
+  if (altKm <= pr[0][0]) return pr[0][1];
+  for (let i = 1; i < pr.length; i++) {
+    if (altKm <= pr[i][0]) {
+      const f = (altKm - pr[i-1][0]) / Math.max(1e-9, pr[i][0] - pr[i-1][0]);
+      return pr[i-1][1] + f * (pr[i][1] - pr[i-1][1]);
+    }
+  }
+  return pr[pr.length-1][1];
+}
+/** The inertial heading a given pitch means where the vehicle is right now. */
+function pitchToTheta(pitchDeg) {
+  // The horizon in the direction of flight is 90° round from straight up; the
+  // launch runs with the planet's rotation, which is the direction everything
+  // in this simulation orbits.
+  return normAngle(Math.atan2(S.r.y, S.r.x) + Math.PI/2 - pitchDeg * Math.PI/180);
+}
+/** The vehicle's actual pitch above the local horizon, degrees. */
+function currentPitch() {
+  return angDiff(Math.atan2(S.r.y, S.r.x) + Math.PI/2, S.att.theta) * -180/Math.PI;
+}
+
+/** Light the first stage. Returns a refusal, or null. */
+function ignite() {
+  const p = S.pad;
+  if (!p) return 'This vehicle is not on a pad.';
+  if (p.ignited) return 'The engine is already lit.';
+  if (!sysOn('PRESS')) return 'PROPULSION NOT PRESSURISED — the engine will not light on unpressurised tanks.';
+  if (!sysOn('GNC')) return sysState('GNC') === 'START'
+    ? `GUIDANCE ALIGNING — ${fmtT(alignLeft())} to go. There is no pitch reference to fly until the platform is aligned.`
+    : 'GUIDANCE NOT ALIGNED — the ascent has no attitude reference. Bring GUIDANCE up on the SYS page.';
+  if (S.craft.fuel <= 0) return 'No propellant in the lit stage.';
+  const twr = curThrust() * 1000 / (craftMass() * G0);
+  if (twr <= 1) return `THRUST DOES NOT EXCEED WEIGHT — ${(curThrust()*1000/1000).toFixed(0)} kN against `
+    + `${(craftMass()*G0/1000).toFixed(0)} kN of vehicle. This stack cannot lift off at ${(S.throttle*100).toFixed(0)}% throttle.`;
+  p.ignited = true; p.held = false; p.lifted = true; p.liftT = S.t; p.liftTheta = p.theta;
+  p.hold = false; p.T = 0;
+  S.preBurnWarp = S.warp;
+  if (S.warp > 10) S.warp = 10;
+  setAttMode('INRT', pitchToTheta(pitchCommand(0)));
+  S.burn = { dir: 'INRT', left: Infinity, total: Infinity, ascent: true };
+  say(`LIFTOFF · ${S.craft.stageName || S.craft.name} at ${(curThrust()*1000).toFixed(0)} N, `
+    + `thrust-to-weight ${twr.toFixed(2)}. Guidance has the pitch program.`, 'key');
+  return null;
+}
+
+/** Run the count. Called with the clock, AFTER the step it belongs to: T−0 and
+ *  the MET of ignition have to be the same instant, or the count lies by a
+ *  whole chunk — which at ten seconds a chunk on the pad is a visible lie. */
+function stepCount(dt) {
+  const p = S.pad;
+  if (!p || p.lifted) return;
+  padPlace(dt);
+  if (p.hold) return;
+  p.T += dt;
+  for (const mark of [-300, -60, -30, -10]) {
+    if (p.T >= mark && p.T - dt < mark) say(`T${fmtCount(mark)} and counting.`, 'sys');
+  }
+  if (p.T >= 0) {
+    const bad = ignite();
+    if (bad) { p.hold = true; p.T = Math.min(p.T, -10); say('COUNT HELD AT T−00:10 · ' + bad, 'err'); }
+  }
+}
+
+/** Ascent guidance: the pitch program, max Q and the fairing. Called BEFORE
+ *  the attitude step, because it is what the attitude step is chasing. */
+function stepLaunch(dt) {
+  const p = S.pad;
+  if (!p || !p.lifted) return;
+  // Flying. Guidance owns the attitude until the program runs out or the
+  // player takes it back with any other HOLD.
+  if (S.att.mode === 'INRT' && !p.meco) {
+    const alt = V.len(S.r) - BODIES[p.body].R;
+    S.att.inertial = pitchToTheta(pitchCommand(alt));
+  }
+  if (!p.cleared && V.len(S.r) - BODIES[p.body].R > TOWER) {
+    p.cleared = true;
+    say(`TOWER CLEARED · ${(curThrust()*1000/(craftMass()*G0)).toFixed(2)} g and climbing.`, 'ok');
+  }
+  const q = dynPressure();
+  if (q > p.maxQ) { p.maxQ = q; p.maxQalt = V.len(S.r) - BODIES[p.body].R; }
+  if (!p.qCalled && q > 0 && p.maxQ > 0 && q < p.maxQ * 0.9 && p.maxQ > 5000) {
+    p.qCalled = true;
+    say(`MAX Q PASSED · ${(p.maxQ/1000).toFixed(1)} kPa at ${p.maxQalt.toFixed(0)} km. The vehicle is through the worst of the air.`, 'ok');
+  }
+  // The fairing is what the arrays are folded behind. It goes when there is no
+  // longer any air to justify carrying it, and that is when they can deploy.
+  if (S.fairing && !inAtmosphere()) {
+    S.fairing = false;
+    say(`FAIRING JETTISON · ${(V.len(S.r) - BODIES[p.body].R).toFixed(0)} km. The solar arrays can be deployed from here.`, 'ok');
+  }
+}
+/* ---- the launch window --------------------------------------------------
+   There is no plane to match in a planar world, so an inclination launch
+   window does not exist here. A PHASING window does, and it is the real
+   constraint anyway: lift off when the station is the right distance ahead and
+   the transfer from the parking orbit meets it; lift off at any other moment
+   and the difference is paid back in laps around the planet.
+
+   ASCENT_TIME and ASCENT_ARC are measured, not assumed — they come from flying
+   the filed pitch program on the standard stack and reading the clock and the
+   downrange angle at insertion (see tests/launch.test.js, which re-measures
+   them and fails if the profile drifts away from these).                    */
+const ASCENT_TIME = 515;                 // s, pad to insertion
+const ASCENT_ARC  = 18.0 * Math.PI/180;  // rad of downrange travel in that time
+const PARK_ALT    = 185;                 // km, the orbit the filed program aims at
+function launchWindow() {
+  const p = S.pad;
+  if (!p) return null;
+  const o = S.objects.find(x => x.id === 'STATION' && x.soi === p.body);
+  if (!o) return null;
+  const b = BODIES[p.body], mu = b.mu;
+  const r1 = b.R + PARK_ALT, r2 = V.len(o.r);
+  const at = (r1 + r2) / 2;
+  const tof = Math.PI * Math.sqrt(at*at*at/mu);          // half the transfer ellipse
+  const ws = Math.sqrt(mu/(r2*r2*r2));                   // station's angular rate
+  const wp = b.rot || 0;                                 // the pad's
+  // Where the station has to be, relative to the pad, at the moment of liftoff:
+  // the Hohmann phase requirement, plus the arc the ascent itself covers, less
+  // what the station travels while the vehicle is climbing.
+  const want = normAngle(Math.PI - ws*tof + ASCENT_ARC - ws*ASCENT_TIME);
+  const lead = normAngle(Math.atan2(o.r.y, o.r.x) - p.theta);
+  const rel = ws - wp;
+  const wait = rel > 1e-14 ? normAngle(want - lead) / rel : Infinity;
+  return { want, lead, wait, tof, alt: r2 - b.R };
+}
+
+/** T−/T+ as a count reads it. */
+function fmtCount(sec) {
+  const s = Math.abs(Math.floor(sec));
+  return (sec < 0 ? '−' : '+') + String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
 }
 
 /* ---- sphere-of-influence patching -------------------------- */
@@ -1410,8 +1789,19 @@ function advance(dtSim) {
   let left = dtSim, guard = 0;
   while (left > 1e-9 && guard++ < 220) {
     let dt;
-    if (S.burn) {
+    if (S.pad && !S.pad.lifted) {
+      // Standing on the pad. The clock runs — warm-ups, the battery and the
+      // count all live on it — but nothing is being propagated, and the count
+      // is an ignition, so the chunk must never step over T−0.
+      dt = Math.min(left, 10);
+      if (!S.pad.hold && S.pad.T < 0) dt = Math.min(dt, Math.max(0.25, -S.pad.T));
+    } else if (S.burn) {
       dt = Math.min(left, 0.5, S.burn.left);
+    } else if (inAtmosphere()) {
+      // Inside the air the trajectory is integrated, not propagated, and the
+      // density it is integrated through doubles every six kilometres. Half a
+      // second is the same chunk a burn gets and for the same reason.
+      dt = Math.min(left, 0.5);
     } else {
       const e = el(), b = soiBody();
       // Move at most ~2% of the current radius per chunk. Bounding by a fraction
@@ -1443,6 +1833,15 @@ function advance(dtSim) {
       // whole guidance alignment. Bound the chunk while anything is starting.
       // A warm mission never has anything starting, so this never touches one.
       if (sysStarting()) cap = Math.min(cap, 10);
+      // The atmospheric interface is an event exactly like a sphere of
+      // influence, and it is a hundred times thinner. A decaying orbit stepped
+      // at 17 s a chunk arrives two hundred kilometres deep into air that
+      // should have caught it at the top, so bound the chunk by the time left
+      // to the interface whenever the vehicle is falling toward one.
+      if (b.rho0) {
+        const out = (e.r - b.R) - b.atmo, rate = -e.vr;
+        if (out > 0 && rate > 1e-9) cap = Math.min(cap, Math.max(0.5, out * 0.4 / rate));
+      }
       // Docking is centimetre work and the coasting chunk is sized for orbits:
       // 17 s at station altitude, nearly two metres of travel at a docking
       // closing rate. That steps straight over a capture envelope measured in
@@ -1461,13 +1860,23 @@ function advance(dtSim) {
     // the engine use the previous step's attitude, and the solver — which
     // assumes the vehicle is pointed — would no longer predict the flight. Over
     // an 800 s injection that lag is enough to miss a sphere of influence.
+    // Guidance leads attitude leads thrust. The pitch program is what the
+    // autopilot is chasing, so it has to be written before the autopilot runs.
+    if (S.pad) stepLaunch(dt);
     stepAttitude(dt);
-    if (S.burn) burnStep(dt); else if (S.dock.phase === 'FREE') {
-      const b = soiBody();
-      const out = propagate(S.r, S.v, b.mu, dt);
-      S.r = out.r; S.v = out.v;
+    if (S.pad && !S.pad.lifted) { /* held down: the planet is the only thing moving it */ }
+    else if (S.burn) burnStep(dt);
+    else if (S.dock.phase === 'FREE') {
+      if (inAtmosphere()) burnStep(dt);          // drag is not conservative: integrate
+      else {
+        const b = soiBody();
+        const out = propagate(S.r, S.v, b.mu, dt);
+        S.r = out.r; S.v = out.v;
+      }
     }
     S.t += dt; left -= dt;
+    // The count belongs to the clock, not to the step before it.
+    if (S.pad && !S.pad.lifted) stepCount(dt);
     for (const o of S.objects) stepObject(o, dt);
     // Attitude leads thrust; docking follows the world. Contact can only be
     // judged once both vehicles have been moved.
@@ -1489,6 +1898,8 @@ function stepObject(o, dt) {
 }
 
 /* ---- hazards ----------------------------------------------- */
+/** How far past its design dynamic pressure a stage survives. */
+const Q_BREAK = 1.4;
 function checkHazards() {
   const b = soiBody(), rr = V.len(S.r), alt = rr - b.R;
   if (S.power.batt <= 0 && S.power.gen < S.power.load) {
@@ -1525,6 +1936,27 @@ function checkHazards() {
   if (S.therm.hull > tl*0.8 && !S.warnedTherm) { S.warnedTherm = true; say(`CAUTION · HULL ${S.therm.hull.toFixed(0)} °C — limit is ${tl} °C`, 'warn'); }
   if (S.therm.hull > tl) return loseMission(`VEHICLE LOST — thermal failure. Hull exceeded ${tl} °C.`);
 
+  // Dynamic pressure. A stage is built for a design q and will fly through it
+  // all day; there is a margin above it, and past that the vehicle comes apart.
+  // Throttling back is what the margin is for.
+  const qLim = S.craft.qMax;
+  if (isFinite(qLim) && qLim > 0 && D.q > 0) {
+    if (D.q > qLim * Q_BREAK)
+      return loseMission(`VEHICLE LOST — structural failure at ${(D.q/1000).toFixed(1)} kPa dynamic pressure, `
+        + `${(D.q/qLim).toFixed(2)}× the design limit of ${(qLim/1000).toFixed(0)} kPa. Throttle back through max Q.`);
+    if (D.q > qLim && !S.warnedQ) { S.warnedQ = true;
+      say(`CAUTION · DYNAMIC PRESSURE ${(D.q/1000).toFixed(1)} kPa — over the ${(qLim/1000).toFixed(0)} kPa design limit. `
+        + `Throttle back: the vehicle breaks up at ${(qLim*Q_BREAK/1000).toFixed(0)} kPa.`, 'warn'); }
+    else if (D.q < qLim * 0.9) S.warnedQ = false;
+  }
+
+  // A vehicle on the pad is at zero altitude and is not falling — and it is
+  // still at zero altitude for the instant after the engine lights, which the
+  // impact check would otherwise read as a 465 m/s crash into the ground it is
+  // standing on. It stops being a pad and starts being a trajectory when it
+  // has cleared the tower.
+  if (S.pad && !S.pad.cleared) return false;
+
   if (alt <= 0) {
     const vv = Math.abs(V.dot(S.v, V.unit(S.r))) * 1000;      // m/s vertical
     const hv = Math.abs(V.crs(V.unit(S.r), S.v)) * 1000;      // m/s horizontal
@@ -1536,9 +1968,13 @@ function checkHazards() {
     }
     return loseMission(`VEHICLE LOST — surface impact on ${b.name} at ${Math.hypot(vv,hv).toFixed(0)} m/s.`);
   }
-  if (b.atmo && alt < b.atmo * 0.5 && !S.landingAllowed) {
-    if (!S.warnedAtmo) { S.warnedAtmo = true; say(`CAUTION · ATMOSPHERIC INTERFACE — ${alt.toFixed(0)} km, raise periapsis`, 'warn'); }
-  }
+  // The interface is no longer only a caution: below it the air is real, it
+  // takes energy out of the orbit every second, and it does not give it back.
+  if (b.atmo && alt < b.atmo && !S.landingAllowed && !(S.pad && !S.pad.lifted)) {
+    if (!S.warnedAtmo) { S.warnedAtmo = true;
+      say(`CAUTION · ATMOSPHERIC INTERFACE — ${alt.toFixed(0)} km and inside the air. `
+        + `Drag is taking energy out of this orbit; ${D.q > 200 ? 'this vehicle has no heat shield' : 'raise periapsis'}.`, 'warn'); }
+  } else if (alt > b.atmo * 1.2) S.warnedAtmo = false;
   return false;
 }
 
@@ -2020,15 +2456,15 @@ function startBurn(dir, dur, scheduled) {
 }
 function burnDV(dur) {
   const m0 = craftMass();
-  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  const mdot = curFlow();
   const m1 = Math.max(m0 - Math.min(S.craft.fuel, mdot*dur), 1);
-  return S.craft.isp*G0*Math.log(m0/m1);
+  return curIsp()*G0*Math.log(m0/m1);
 }
 /** seconds of burn needed for a given ΔV (m/s) */
 function burnTimeFor(dv) {
   const m0 = craftMass();
-  const m1 = m0 / Math.exp(dv/(S.craft.isp*G0));
-  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  const m1 = m0 / Math.exp(dv/(curIsp()*G0));
+  const mdot = curFlow();
   return (m0 - m1)/mdot;
 }
 
@@ -2088,10 +2524,78 @@ function exec(raw) {
     return startBurn(dir, dur);
   }
 
-  case 'CANCEL': case 'ABORT': {
-    if (S.burn) { endBurn('BURN ABORTED', 'warn'); return; }
+  case 'CANCEL': case 'ABORT': case 'MECO': {
+    if (S.burn) { endBurn(S.burn.ascent ? 'MECO — main engine cutoff' : 'BURN ABORTED',
+                          S.burn.ascent ? 'ok' : 'warn'); if (S.pad) S.pad.meco = S.t; return; }
     if (S.sched) { S.sched = null; return say('Armed burn cleared.', 'sys'); }
     return say('Nothing to cancel.', 'sys');
+  }
+
+  /* ---- launch: the count, the program, the stack, the throttle ---- */
+  case 'LAUNCH': case 'PAD': case 'ASCENT': {
+    if (!S.pad) return say('This vehicle is not on a pad. The launch page is live only before liftoff.', 'err');
+    return gotoPage('LNCH');
+  }
+  case 'COUNT': case 'CTDN': case 'CLOCK': {
+    if (!S.pad) return say('No countdown — this vehicle is not on a pad.', 'err');
+    const p = S.pad;
+    if (p.lifted) return say('Lifted off at ' + fmtMET(p.liftT) + '. The count is done.', 'sys');
+    const w = A[0] || '';
+    if (w === 'HOLD' || w === 'STOP') { p.hold = true;
+      return say(`COUNT HELD at T${fmtCount(p.T)}. RESUME when you are ready — nothing else stops.`, 'warn'); }
+    if (w === 'GO' || w === 'RESUME' || w === 'START') { p.hold = false;
+      return say(`COUNT RESUMED · T${fmtCount(p.T)} and counting.`, 'ok'); }
+    if (w === 'SET') { const v = num(1, NaN);
+      if (!isFinite(v) || v < 0) return say('Usage: COUNT SET <seconds before liftoff>', 'err');
+      p.T = -v; return say(`COUNT RESET to T${fmtCount(p.T)}${p.hold ? ', still holding' : ''}.`, 'sys'); }
+    return say(`T${fmtCount(p.T)}${p.hold ? '  HOLDING' : ' and counting'}.  COUNT HOLD | GO | SET <s>`, 'sys');
+  }
+  case 'PITCH': {
+    if (!S.pad) return say('The pitch program belongs to a vehicle on the pad.', 'err');
+    if (A[0] === 'DEFAULT' || A[0] === 'RESET') {
+      S.pad.program = PITCH_DEFAULT.map(r => [r[0], r[1]]);
+      return say('PITCH PROGRAM RESET to the filed profile.', 'sys');
+    }
+    if (!A.length) {
+      head('PITCH PROGRAM');
+      S.pad.program.forEach((r,i) => row(`ROW ${i+1}`, `${r[0].toFixed(1)} km   ${r[1].toFixed(0)}°`));
+      say('PITCH <row> <altitude km> <pitch deg>   ·   PITCH DEFAULT', 'out');
+      return;
+    }
+    const ix = num(0, NaN), alt = num(1, NaN), pit = num(2, NaN);
+    if (!isFinite(ix) || ix < 1 || ix > S.pad.program.length)
+      return say(`Row must be 1 to ${S.pad.program.length}.`, 'err');
+    if (!isFinite(alt) || alt < 0 || !isFinite(pit) || pit < -10 || pit > 90)
+      return say('Usage: PITCH <row> <altitude km> <pitch 0-90°>. 90° is straight up, 0° is along the horizon.', 'err');
+    S.pad.program[ix-1] = [alt, pit];
+    S.pad.program.sort((a,b) => a[0] - b[0]);
+    return say(`PITCH PROGRAM · ${alt.toFixed(1)} km at ${pit.toFixed(0)}° above the horizon.`, 'ok');
+  }
+  case 'IGNITE': {
+    if (!S.pad) return say('Nothing to ignite — this vehicle is not on a pad.', 'err');
+    if (!S.pad.lifted) { const bad = ignite(); return bad ? say(bad, 'err') : undefined; }
+    // Relighting a stage in flight, still under the pitch program.
+    if (S.burn) return say('The engine is already lit.', 'err');
+    if (S.craft.fuel <= 0) return say('This stage is dry. STAGE first.', 'err');
+    if (!sysOn('PRESS')) return say('PROPULSION NOT PRESSURISED.', 'err');
+    S.pad.meco = null;
+    S.burn = { dir: 'INRT', left: Infinity, total: Infinity, ascent: true };
+    setAttMode('INRT', pitchToTheta(pitchCommand(Math.max(0, D.alt))));
+    return say(`IGNITION · ${S.craft.stageName || S.craft.name}, guidance on the pitch program.`, 'key');
+  }
+  case 'STAGE': case 'SEP': {
+    const bad = jettisonStage();
+    return bad ? say(bad, 'err') : undefined;
+  }
+  case 'THR': case 'THROTTLE': {
+    if (!A.length) return say(`Throttle ${(S.throttle*100).toFixed(0)}%.  THR <5-100>`, 'sys');
+    let v = num(0, NaN);
+    if (!isFinite(v)) return say('Usage: THR <percent>, 5 to 100.', 'err');
+    if (v > 1 && v <= 100) v /= 100;
+    if (!(v >= 0.05 && v <= 1)) return say('Throttle runs from 5% to 100% — below that the engine will not stay lit.', 'err');
+    S.throttle = v;
+    return say(`THROTTLE ${(v*100).toFixed(0)}% · ${(curThrust()*1000).toFixed(0)} N`
+      + (S.burn ? '' : '. The solver plans at whatever the throttle is set to.'), 'sys');
   }
 
   case 'HOLD': case 'ATT': {
@@ -2260,7 +2764,7 @@ function quoteBurn(dv, whereLabel, tt, solved) {
              : whereLabel && whereLabel.includes('apoapsis') ? 'AP' : null;
   S.solution = { name: S.planName || 'MANEUVER', dir, secs, node, nodeLabel: whereLabel || 'immediate',
                  dv: Math.abs(dv), detail: S.planDetail || '',
-                 prop: secs != null ? secs * (S.craft.thrust*1000/(S.craft.isp*G0)) : null };
+                 prop: secs != null ? secs * (curFlow()) : null };
   if (whereLabel) {
     row('IGNITION', `${whereLabel}` + (isFinite(tt) ? `, T\u2212${fmtT(tt)}` : ''));
     say('');
@@ -2275,7 +2779,7 @@ function quoteBurn(dv, whereLabel, tt, solved) {
 /** Fly a finite burn forward without touching live state. */
 function simBurn(r0, v0, mu, mode, dur, m0) {
   let r = {...r0}, v = {...v0}, m = m0, t = 0;
-  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  const mdot = curFlow();
   const fuel = S.craft.fuel;
   while (t < dur - 1e-9) {
     const dt = Math.min(0.5, dur - t);
@@ -2283,7 +2787,7 @@ function simBurn(r0, v0, mu, mode, dur, m0) {
     const dirv = mode === 'PRO'  ? V.unit(v)
                : mode === 'RET'  ? V.mul(V.unit(v), -1)
                : mode === 'ROUT' ? V.unit(r) : V.mul(V.unit(r), -1);
-    const aT = S.craft.thrust / m;
+    const aT = curThrust() / m;
     const acc = (rv) => { const rr = V.len(rv);
       return V.add(V.mul(rv, -mu/(rr*rr*rr)), V.mul(dirv, aT)); };
     const k1r = v,                          k1v = acc(r);
@@ -2314,7 +2818,7 @@ function nodeTime(node, body) {
  */
 function solveBurn(node, mode, metric, target, body) {
   const b = soiBody(), mu = b.mu;
-  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  const mdot = curFlow();
   const maxDur = S.craft.fuel / mdot;
   const t0 = nodeTime(node, body);
   if (!isFinite(t0)) return null;
@@ -2580,7 +3084,7 @@ function cmdPlan(A) {
       say('');
       S.solution = { name: 'TRANSFER TO ' + tk, dir: sol.mode, secs: sol.dur, node: 'T',
                      when: S.t + sol.tIgn, nodeLabel: `T+${sol.tIgn.toFixed(2)} s`,
-                     dv: Math.abs(w.dv1), prop: sol.dur * (S.craft.thrust*1000/(S.craft.isp*G0)),
+                     dv: Math.abs(w.dv1), prop: sol.dur * (curFlow()),
                      detail: `arrive ${fmtDist(sol.arrival.periAlt)} over ${tk}` };
       say(`  →  BURN ${sol.mode} ${sol.dur.toFixed(2)} AT T+${sol.tIgn.toFixed(2)}`, 'ok');
       say(`Solution integrated through the sphere-of-influence change. Aim point is offset from ${tk}'s centre — an unbiased transfer to its orbital radius is an impact trajectory.`, 'dim');
@@ -2643,7 +3147,7 @@ function cmdPlan(A) {
     say('');
     S.solution = { name: 'RENDEZVOUS', dir: dv1 >= 0 ? 'PRO' : 'RET', secs, node: 'T',
                    when: S.t + wait, nodeLabel: `T+${wait.toFixed(2)} s`, dv: Math.abs(dv1),
-                   prop: secs * (S.craft.thrust*1000/(S.craft.isp*G0)),
+                   prop: secs * (curFlow()),
                    detail: `transfer to ${fmtDist(se.a - b.R)}, then CIRC AP` };
     say(`  →  BURN ${dv1 >= 0 ? 'PRO' : 'RET'} ${secs.toFixed(2)} AT T+${wait.toFixed(2)}`, 'ok');
     say(`  then, half an orbit later:   PLAN CIRC AP`, 'ok');
@@ -2909,9 +3413,46 @@ function rig(o) {
                            rcs:0, rcsMax:0, rcsIsp:220, crew:0, o2:0,
                            slewRate: 4 * Math.PI/180,      // rad/s maximum
                            slewAccel: 2 * Math.PI/180,     // rad/s^2
-                           slewPower: 90 }, o);            // W drawn by the wheels while turning
+                           slewPower: 90,                  // W drawn by the wheels while turning
+                           // Drag area. Every vehicle has one — an orbiting
+                           // spacecraft simply never meets air thick enough
+                           // for it to matter, and the model says so by
+                           // returning zero density above the interface.
+                           cda: 12, qMax: Infinity,
+                           thrustSL: null, ispSL: null,
+                           stages: null, stageIx: null, stageName: null, payload: 0 }, o);
   S.craft.fuelMax = o.fuel; S.craft.rcsMax = o.rcs || 0;
+  S.craft.cdaPayload = S.craft.cda;
+  // A stacked vehicle. The spacecraft itself is the LAST stage of its own
+  // stack — its dry mass, its tanks and its engine — so that dropping the
+  // spent upper stage hands the player exactly the vehicle `rig` describes,
+  // with full tanks, and so that the propellant it is carrying is lifted
+  // rather than conjured. Getting this wrong is worth 20 tonnes of launch
+  // mass, which is 20 tonnes the first stage never has to lift.
+  if (o.stages && o.stages.length) {
+    S.craft.payload = 0;
+    S.craft.stages = o.stages.map(st => ({ ...st })).concat([{
+      name: o.name, dry: o.dry, fuel: o.fuel || 0, thrust: o.thrust, isp: o.isp,
+      cda: S.craft.cdaPayload, qMax: Infinity, spacecraft: true }]);
+    loadStage(0);
+  }
 }
+
+/* ---- the launch vehicle -------------------------------------------------
+   Two stages under whatever is riding on top. The numbers are ordinary for a
+   medium launcher: a first stage that is mostly propellant and loses a tenth
+   of its specific impulse to back-pressure at sea level, and a vacuum second
+   stage that finishes the job. `cda` is Cd·A in m², `qMax` the design dynamic
+   pressure — 1.4× that and the stack comes apart, which is what the throttle
+   is for.
+
+   Both launch missions fly the same stack, so one ascent tuning serves both
+   and the ΔV budget means the same thing in each.                          */
+const ASCENT_STACK = () => [
+  { name:'FIRST STAGE',  dry:23000, fuel:430000, thrust:9400, thrustSL:8300, isp:311, ispSL:282,
+    cda:16, qMax:40000 },
+  { name:'SECOND STAGE', dry:4500,  fuel:110000, thrust:1100, isp:348, cda:10, qMax:40000 },
+];
 
 const MISSIONS = [
 {
@@ -3078,27 +3619,55 @@ const MISSIONS = [
 {
   id:0, code:'FREE', name:'FREE FLIGHT',
   brief:[
-    'This vehicle is {cold and dark}. Nothing is running, the arrays are stowed, and you are in {eclipse} with about a quarter of an hour until sunrise and a fifth of a battery to spend on it.',
-    'Close the battery tie, then bring the systems up in an order that works: the bus feeds everything, the avionics feed the guidance and the propulsion, and the guidance platform needs {three minutes} of alignment with the vehicle held still. Get the arrays out before the battery goes. {SYS} lists it all, and {PWR UP} will run the sequence for you at the same speed.',
-    'Draw more than the battery can carry and the bus trips — you lose everything downstream of it, alignment included.',
-    'Then it is yours. Full tanks, {200 km} Earth orbit, the Moon three days away. Station {CERES} is up at {400 km} and will take a docking: TGT STATION, PLAN RDV, then DOCK. AUTO DOCK is fitted, and the station will refuel you once you are hard docked.'],
-  hint:'BATT → SYS BUS → SYS AVIO → SYS ARRAY → SYS ATT → SYS GNC',
+    'You are on the pad at {Cape Auriga}, bolted to a two-stage launch vehicle, and the vehicle is {cold and dark}. The count is holding at {T−10:00} and nothing will happen until you release it.',
+    'Close the battery tie, then bring the systems up in an order that works: the bus feeds everything, the avionics feed the guidance and the propulsion, and the guidance platform needs {three minutes} of alignment with the vehicle held still. {SYS} lists it all, and {PWR UP} will run the sequence for you at the same speed. Nothing lights without pressurised tanks and an aligned platform.',
+    'The arrays are folded behind the fairing, so the battery is the only power there is until you are out of the atmosphere. Draw more than it can carry and the bus trips — you lose everything downstream of it, alignment included.',
+    '{LAUNCH} holds the count, the pitch program and the phasing to CERES — there is no plane to match in this world, only a time. Resume the count when the window suits you; at T−0 the first stage lights and guidance flies the program. {STAGE} when the first stage is dry, cut off when apoapsis reaches {185 km}, then coast up and {PLAN CIRC AP}.',
+    'After that it is yours. The upper stage puts you in orbit with {full tanks}: the Moon is three days away, and station {CERES} at {400 km} will take a docking — TGT STATION, PLAN RDV, then DOCK.'],
+  hint:'BATT → PWR UP → LAUNCH → COUNT GO',
   // The sandbox is the one place that starts dark: the scripted missions are
   // lessons in orbital mechanics and stay warm. A mission may name any subset.
   sys: [],
-  setup(){ rig({name:'TESTBED', dry:2500, fuel:20000, thrust:60, isp:340, rcs:200, crew:1, o2:90000});
-    // Placed in the Earth's shadow, about fifteen minutes short of sunrise: the
-    // arrays are worth nothing until then and the battery is all there is.
-    setOrbit('EARTH', 200, 200, 78, 0);
+  setup(){ rig({name:'TESTBED', dry:2500, fuel:20000, thrust:60, isp:340, rcs:200, crew:1, o2:90000,
+                cda:9, stages: ASCENT_STACK()});
+    // On the pad, on internal power. The pack is the only source until the
+    // fairing goes, which is what makes the count something to spend wisely
+    // rather than sit through: a full power-up is four minutes of it.
+    setPad('EARTH', 0, { count: 600 });
     S.objects = [ makeStation('EARTH', 400, 25) ];
-    // A fifth of a 1200 Wh pack is about twenty-five minutes at a full bus
-    // load, against roughly fifteen minutes of eclipse left to run. Brisk is
-    // comfortable; idling with everything on is not. Sunrise and 60 m² of
-    // array refill it in about three minutes.
-    S.power.battMax = 1200; S.power.batt = 240; S.power.area = 60; },
+    // Enough to power up, hold a while and fly, and not enough to idle
+    // through a missed window: a full lap of relative phasing is 104 minutes
+    // and 420 Wh is 74 of them at a full bus. Wait that long and you will be
+    // shedding load to do it.
+    S.power.battMax = 1200; S.power.batt = 420; S.power.area = 60; },
   obj:[]
 },
+{
+  id:10, code:'M-00', name:'LAUNCH', next:1,
+  brief:[
+    'Sea level, and everything above you. This vehicle is on the pad with a two-stage launcher underneath it and a {185 km} orbit to reach.',
+    'Orbit costs about {7.8 km/s} of velocity. You will spend nearer {8.9 km/s} getting there: the difference is gravity — every second spent climbing is a second of thrust paid to hold the vehicle up — and the air, which is thick enough at sea level to matter and gone by {140 km}. The planet hands you {465 m/s} of it for free, because you are already moving.',
+    'So you do not fly straight up. You pitch over: {90°} off the pad, then steadily flatter, trading altitude for the sideways speed that is what orbit actually is. The {pitch program} on the LAUNCH page is that plan — five altitudes and the pitch to hold at each. It comes filed; you may fly it or change it.',
+    'Watch dynamic pressure through {13 km}. The filed profile peaks at {35 kPa} against a {40 kPa} design limit, and the stack comes apart at 56 — flatten the turn and you will find that out. THR throttles back.',
+    'First stage runs dry near {T+02:20}: {STAGE} and the second lights itself. Shut down when apoapsis reaches {185 km}, coast up to it, and circularise with {PLAN CIRC AP} — which is the whole of M-01, flown from the ground up.'],
+  hint:'COUNT GO → STAGE → MECO at 185 km apoapsis → PLAN CIRC AP',
+  setup(){ rig({name:'AURIGA-0', dry:2500, fuel:20000, thrust:60, isp:340, rcs:200,
+                cda:9, stages: ASCENT_STACK()});
+    setPad('EARTH', 0, { count: 120 });
+    S.power.battMax = 1200; S.power.batt = 1200; S.power.area = 60; },
+  obj:[
+    { text:'Clear the atmosphere — above 140 km', check:(s,d)=> d.alt > 140 },
+    { text:'Reach orbit — periapsis above 150 km', check:(s,d)=> d.perAlt > 150 },
+    { text:'Circular parking orbit (e < 0.02, apoapsis under 400 km)',
+      check:(s,d)=> d.e.e < 0.02 && d.perAlt > 150 && d.apoAlt < 400 },
+  ]
+},
 ];
+/* The roster reads as a ladder, and launch comes before insertion. Ids are not
+   renumbered to say so — they are saved in the flight record and every suite
+   calls them by number — so the order is stated here instead. */
+const ROSTER_ORDER = [10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0];
+const rosterList = () => ROSTER_ORDER.map(id => MISSIONS.find(m => m.id === id)).filter(Boolean);
 
 function loadMission(id) {
   const m = MISSIONS.find(x => x.id === id);
@@ -3115,14 +3684,18 @@ function loadMission(id) {
   S.therm.hull = 20; S.ledger = { dvUsed:0, burns:0 };
   S.loads = { HEAT:true, SCI:false, COMM:true };
   S.flags = { lunarSOI:false, perihelionPassed:false };
-  S.warnedPower = S.warnedTherm = S.warnedAtmo = S.warnedBus = false;
+  S.warnedPower = S.warnedTherm = S.warnedAtmo = S.warnedBus = S.warnedQ = false;
   S.o2Warn = 0;
+  S.throttle = 1; S.pad = null; S.fairing = false;
   m.setup();
   // Which systems this vehicle wakes up with. `sys` omitted means all of them,
   // which is how every scripted mission has always booted and still does; an
   // explicit list is the cold (or partly cold) case, and [] is fully dark.
   sysBoot(m.sys);
   S.att.theta = commandedTheta('PRO');   // vehicles start pointed prograde
+  // A vehicle on the pad points at the sky, not along its velocity: standing
+  // on a turning planet it is already doing 465 m/s, and prograde is sideways.
+  if (S.pad) { S.att.theta = pitchToTheta(90); S.att.inertial = S.att.theta; }
   // A dark vehicle has no platform to hold an attitude against.
   if (!sysOn('GNC')) S.att.mode = 'FREE';
   S.mission = m;
@@ -3153,7 +3726,10 @@ function loadMission(id) {
     say('VEHICLE PARTLY POWERED · SYS lists what is running and what is not.', 'warn');
   // A dark vehicle opens on its systems page, so closing the battery tie lands
   // the player exactly where the rest of the sequence is.
-  if (typeof gotoPage === 'function') gotoPage(sysOn('AVIO') ? 'MSN' : 'SYS');
+  // A dark vehicle opens where the power-up is; a warm one on the pad opens on
+  // the count, which is the only thing it can do next.
+  if (typeof gotoPage === 'function')
+    gotoPage(!sysOn('AVIO') ? 'SYS' : (S.pad && !S.pad.lifted) ? 'LNCH' : 'MSN');
   saveProgress();
 }
 
@@ -3181,7 +3757,7 @@ function checkObjectives() {
     row('BURNS', String(S.ledger.burns));
     row('PROP LEFT', S.craft.fuel.toFixed(1) + ' kg');
     say('');
-    const nxt = MISSIONS.find(m => m.id === S.mission.id + 1);
+    const nxt = MISSIONS.find(m => m.id === (S.mission.next != null ? S.mission.next : S.mission.id + 1));
     if (nxt) row('NEXT', `MIS ${nxt.id}   ${nxt.code} ${nxt.name}`, 'sys');
     else row('ROSTER', 'all scripted missions flown', 'sys');
     say('MISSION COMPLETE · ' + S.mission.code, 'ok');
@@ -3390,6 +3966,11 @@ function fire(i, side) {
 }
 
 function gotoPage(id, sub) {
+  // "PAGE#2" selects a sub-page: several pages of one device are one page id
+  // here, and a link has to be able to name which of them it means.
+  if (typeof id === 'string' && id.includes('#')) {
+    const bits = id.split('#'); id = bits[0]; sub = parseInt(bits[1], 10) || 0;
+  }
   if (!PAGES[id]) return;
   CDU.page = id; CDU.sub = sub || 0;
   renderCDU();
@@ -3621,7 +4202,7 @@ BURN: Object.assign(one('BURN'), {
       { l: F('Armed', S.sched ? `${DIRNAME[S.sched.dir]} ${S.sched.dur.toFixed(1)} s` : 'NONE', S.sched ? 'go' : 'dim'),
         r: F('Time to ignition', S.sched ? fmtT(timeToIgnition()) : '——', S.sched ? 'go' : 'dim') },
       { l: F('Prop aboard', S.craft.fuel.toFixed(1) + ' kg'),
-        r: F('Full throttle left', fmtT(S.craft.fuel / (S.craft.thrust*1000/(S.craft.isp*G0)))) },
+        r: F('Full throttle left', fmtT(S.craft.fuel / (curFlow()))) },
       { l: NAV('<MENU', 'MENU'),
         r: (S.burn || S.sched) ? F('', 'CANCEL*', 'go', () => exec('CANCEL'))
            : F('', 'ARM*', 'go', () => {
@@ -3831,6 +4412,80 @@ UTIL: { count: () => 4, title: () => 'UTILITIES',
 /* The cold-start page. Five systems to a page, each with its state, what it is
    waiting for, and one key to start or stop it. Any order that satisfies the
    graph works — the graph is the puzzle, not a fixed checklist. */
+LNCH: { count: () => 3, title: (i) => i === 1 ? 'PITCH PROGRAM' : i === 2 ? 'LAUNCH WINDOW' : 'LAUNCH',
+  sub: () => {
+    const p = S.pad;
+    if (!p) return 'NO PAD';
+    return p.lifted ? 'T' + fmtCount(S.t - p.liftT) : (p.hold ? 'HOLDING  T' : 'T') + fmtCount(p.T);
+  },
+  build: (pg) => {
+    const p = S.pad;
+    if (!p) return [
+      { full: F('Launch', 'THIS VEHICLE IS IN FLIGHT', 'dim') },
+      { full: F('', 'The launch page belongs to a vehicle on the pad. Fly one from the roster to see it.', 'body'), wrap: true },
+      {}, {}, {},
+      { l: NAV('<MENU', 'MENU'), r: NAV('ORBIT>', 'ORB') },
+    ];
+    if (pg === 1) {
+      const alt = D.alt;
+      const rows = p.program.map((r, i) => ({
+        // The value has to fit a 375 px phone beside its EDIT key, so the
+        // reference frame is stated once, in the first row's label, the way a
+        // column heading does it rather than repeating on every line.
+        l: F(i === 0 ? 'Row 1 · above horizon' : `Row ${i+1}`,
+             `${r[0].toFixed(1)} km   ${r[1].toFixed(0)}°`,
+             p.lifted && alt >= r[0] ? 'dim' : 'ok',
+             () => { const v = eatScratch();
+               if (!v) return say(`SCRATCHPAD EMPTY — type altitude/pitch, e.g. 12/56, then press ${i+1}L.`, 'warn');
+               const m2 = v.split(/[\/ ]+/);
+               exec(`PITCH ${i+1} ${m2[0]} ${m2[1] === undefined ? '' : m2[1]}`); }),
+        r: F('', p.lifted && alt >= r[0] ? 'FLOWN' : 'EDIT', p.lifted && alt >= r[0] ? 'dim' : 'sel') }));
+      while (rows.length < 5) rows.push({});
+      rows.push({ l: NAV('<ASCENT', 'LNCH#0'), r: F('', 'RESTORE FILED*', 'go', () => exec('PITCH DEFAULT')) });
+      return rows;
+    }
+    if (pg === 2) {
+      const w = launchWindow();
+      return [
+        { l: F('Target', w ? 'CERES · ' + fmtDist(w.alt) : 'NO STATION', w ? 'ok' : 'dim'),
+          r: F('Phase now', w ? (w.lead*180/Math.PI).toFixed(1) + '°' : '——') },
+        { l: F('Phase wanted', w ? (w.want*180/Math.PI).toFixed(1) + '° at liftoff' : '——', 'key'),
+          r: F('Window in', w ? (p.lifted ? '——' : fmtT(w.wait)) : '——', w && w.wait < 120 ? 'ok' : '') },
+        { full: F('', w
+            ? 'There is no plane to match in this world, only a time. Lift off when the station is that far ahead and you arrive at its altitude just as it gets there; lift off at random and you spend the difference chasing it round the planet.'
+            : 'Nothing to phase with from here.', 'body'), wrap: true },
+        { l: F('Ascent allowance', fmtT(ASCENT_TIME)), r: F('Transfer after insert', w ? fmtT(w.tof) : '——') },
+        {},
+        { l: NAV('<ASCENT', 'LNCH#0'), r: p.lifted ? NAV('ORBIT>', 'ORB')
+             : F('', p.hold ? 'RESUME COUNT*' : 'HOLD COUNT*', 'go', () => exec(p.hold ? 'COUNT GO' : 'COUNT HOLD')) },
+      ];
+    }
+    const q = D.q, qLim = S.craft.qMax;
+    const st = S.craft.stages ? `${S.craft.stageIx+1}/${S.craft.stages.length} · ${S.craft.stageName}` : '——';
+    const canStage = !!(S.craft.stages && S.craft.stageIx < S.craft.stages.length - 1);
+    return [
+      p.lifted
+        ? { l: F('Altitude', fmtDist(D.alt)), r: F('Airspeed', fmtVel(D.vAir)) }
+        : { l: F('Count', 'T' + fmtCount(p.T), p.hold ? 'go' : 'ok'),
+            r: F('', p.hold ? 'RESUME COUNT*' : 'HOLD COUNT*', 'go', () => exec(p.hold ? 'COUNT GO' : 'COUNT HOLD')) },
+      { l: F('Pitch commanded', pitchCommand(Math.max(0, D.alt)).toFixed(0) + '°', 'key'),
+        r: F('Pitch actual', (D.pitch == null ? 0 : D.pitch).toFixed(0) + '°',
+             Math.abs((D.pitch == null ? 0 : D.pitch) - pitchCommand(Math.max(0, D.alt))) > 5 ? 'go' : 'ok') },
+      { l: F('Dynamic pressure', q > 0 ? (q/1000).toFixed(1) + ' kPa' : '0.0 kPa',
+             isFinite(qLim) && q > qLim ? 'bad' : q > 0 ? 'go' : 'ok'),
+        r: F('Design limit', isFinite(qLim) ? (qLim/1000).toFixed(0) + ' kPa' : '——') },
+      { l: F('Throttle', (S.throttle*100).toFixed(0) + '%', S.throttle < 1 ? 'go' : 'ok',
+             () => { const v = eatScratch(); if (!v) return say('SCRATCHPAD EMPTY — type a throttle percentage, then press 4L.', 'warn'); exec('THR ' + v); }),
+        r: F('Thrust / weight', D.twr.toFixed(2), D.twr < 1 ? 'bad' : 'ok') },
+      { l: F('Stage', st), r: F('', canStage ? 'STAGE*' : 'LAST STAGE', canStage ? 'go' : 'dim',
+             canStage ? () => exec('STAGE') : null) },
+      { l: NAV('<PITCH PROGRAM', 'LNCH#1'),
+        r: p.lifted ? F('', S.burn ? 'MECO*' : 'ORBIT>', S.burn ? 'go' : 'sel',
+                        S.burn ? () => exec('MECO') : 'ORB')
+                    : NAV('WINDOW>', 'LNCH#2') },
+    ];
+  } },
+
 SYS: { count: () => 2, title: () => 'SYSTEMS',
   sub: () => {
     const pct = S.power.battMax ? S.power.batt / S.power.battMax * 100 : 0;
@@ -3896,14 +4551,25 @@ PWR: Object.assign(one('ELECTRICAL'), {
 
 FUEL: Object.assign(one('PROPULSION'), { sub: () => S.craft.name, build: () => {
   const pct = S.craft.fuelMax ? S.craft.fuel/S.craft.fuelMax*100 : 0;
-  const mdot = S.craft.thrust*1000/(S.craft.isp*G0);
+  const mdot = curFlow();
   return [
     { l: F('Main propellant', `${S.craft.fuel.toFixed(1)} kg`, pct < 15 ? 'go' : ''),
       r: F('Remaining', `${pct.toFixed(1)}%`, pct < 15 ? 'go' : 'ok') },
     { l: F('ΔV remaining', dv(), 'ok'), r: F('ΔV expended', fmtDV(S.ledger.dvUsed)) },
-    { l: F('Engine thrust', (S.craft.thrust*1000).toFixed(0) + ' N'), r: F('Specific impulse', S.craft.isp + ' s') },
-    { l: F('Flow rate', mdot.toFixed(3) + ' kg/s'), r: F('Full throttle left', fmtT(S.craft.fuel/mdot)) },
-    { l: F('Dry mass', S.craft.dry.toFixed(0) + ' kg'), r: F('RCS propellant', S.craft.rcs.toFixed(2) + ' kg') },
+    { l: F('Engine thrust', (curThrust()*1000).toFixed(0) + ' N'
+           + (S.throttle < 1 ? `  (${(S.throttle*100).toFixed(0)}%)` : '')),
+      r: F('Specific impulse', curIsp().toFixed(0) + ' s') },
+    { l: F('Flow rate', mdot.toFixed(3) + ' kg/s'), r: F('At this throttle', mdot > 0 ? fmtT(S.craft.fuel/mdot) : '——') },
+    S.craft.stages
+      ? { l: F('Stage', `${S.craft.stageIx+1} of ${S.craft.stages.length} · ${S.craft.stageName}`, 'ok',
+               () => exec('STAGE')),
+          r: F('', S.craft.stageIx < S.craft.stages.length-1 ? 'STAGE*' : 'LAST STAGE',
+               S.craft.stageIx < S.craft.stages.length-1 ? 'go' : 'dim',
+               S.craft.stageIx < S.craft.stages.length-1 ? () => exec('STAGE') : null) }
+      : { l: F('Dry mass', S.craft.dry.toFixed(0) + ' kg'), r: F('RCS propellant', S.craft.rcs.toFixed(2) + ' kg') },
+    { l: F('Throttle', (S.throttle*100).toFixed(0) + '%', S.throttle < 1 ? 'go' : 'ok',
+           () => { const v = eatScratch(); if (!v) return say('SCRATCHPAD EMPTY — type a throttle percentage, then press the key.', 'warn'); exec('THR ' + v); }),
+      r: F('Total mass', craftMass().toFixed(0) + ' kg') },
     menuRow('BURN>', 'BURN'),
   ]; } }),
 
@@ -3990,7 +4656,7 @@ MSN: {
 ROSTER: { count: () => Math.ceil(MISSIONS.length / 5), title: () => 'MISSION ROSTER',
   sub: () => '', build: (pg) => {
     const done = loadProgress();
-    const slice = MISSIONS.slice(pg*5, pg*5 + 5);
+    const slice = rosterList().slice(pg*5, pg*5 + 5);
     const rows = slice.map(m => ({ full: F(done.includes(m.id) ? 'FLOWN' : '',
       `<${m.code}  ${m.name}`, S.mission && S.mission.id === m.id ? 'ok' : 'sel',
       () => loadMission(m.id)) }));
@@ -4015,13 +4681,21 @@ MENU: { count: () => 2, title: () => 'INDEX', sub: () => '', build: (pg) => pg =
     { l: NAV('<PROXIMITY OPS', 'DOCK'), r: NAV('MISSION>', 'MSN') },
     { l: NAV('<MESSAGES', 'MSG'), r: NAV('HELP>', 'HELP') },
     { l: F('Reference', soiBody().name), r: F('MET', fmtMET(S.t)) },
-    { l: F('', '', 'dim'), r: F('', '', 'dim') },
+    // Launch is a link, not a thirteenth function key. It is listed whether or
+    // not there is a pad under the vehicle: the page itself says which it is.
+    { l: NAV('<LAUNCH', 'LNCH'),
+      r: S.pad ? F('Count', (S.pad.lifted ? 'T' + fmtCount(S.t - S.pad.liftT) : 'T' + fmtCount(S.pad.T)),
+                   S.pad.hold ? 'go' : 'ok')
+               : F('Pad', 'IN FLIGHT', 'dim') },
   ] : [
     { l: NAV('<ELECTRICAL', 'PWR'), r: NAV('PROPULSION>', 'FUEL') },
     { l: NAV('<THERMAL', 'THRM'), r: NAV('COMMUNICATIONS>', 'COMM') },
     { l: NAV('<LIFE SUPPORT', 'LIFE'), r: NAV('ROSTER>', 'ROSTER') },
     { l: NAV('<SYSTEMS', 'SYS'), r: F('Bus load', D.load.toFixed(0) + ' W') },
-    {},
+    // Launch is a link, not a thirteenth function key — and it is only worth
+    // opening while there is still a pad under the vehicle.
+    { l: NAV('<LAUNCH', 'LNCH'), r: F('Throttle', (S.throttle*100).toFixed(0) + '%',
+                                       S.throttle < 1 ? 'go' : 'dim') },
     { l: NAV('<ORBIT', 'ORB'), r: F('', '', 'dim') },
   ] },
 

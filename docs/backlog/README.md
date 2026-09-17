@@ -8,7 +8,7 @@ constraints and open questions.
 |---|------|--------|-----------|
 | [01](01-docking.md) | Realistic docking — attitude and mechanics both **done** | Done | — |
 | [02](02-cold-start.md) | Cold start and systems configuration | **Done** | — |
-| [03](03-launch.md) | Launch from Earth | Not started | 01 (attitude), 02 (pad state) |
+| [03](03-launch.md) | Launch from Earth | **Done** | — |
 | [04](04-new-missions.md) | New missions | Awaiting examples | 01 / 03 per mission |
 
 Decisions taken: attitude is built inside item 01 scoped to docking's needs and

@@ -1,7 +1,7 @@
 # 03 — Launch from Earth
 
-**Status:** not started
-**Depends on:** 01 (attitude lands there) and 02 (the pad state)
+**Status:** done
+**Depends on:** 01 (attitude lands there) and 02 (the pad state) — both shipped
 
 Split from cold start by decision; that half is now item 02.
 
@@ -92,3 +92,59 @@ used while it acts. The powered/atmospheric phase needs numeric integration
   bit-for-bit unchanged; a scripted ascent reaches a target orbit within a
   realistic ΔV budget; staging and throttle behave.
 - All existing suites pass, with lunar and Mars arrivals unchanged.
+
+
+---
+
+## What shipped
+
+Decided with the product owner before any code was written:
+
+- **Free flight moved to the pad.** The sandbox now begins cold and dark at
+  sea level, which is the north star's first leg: cold/dark from Earth,
+  rendezvous, dock. The eclipse power tension item 02 built is replaced by the
+  pad's — the arrays are folded behind the fairing, so the pack is the only
+  power there is until 140 km.
+- **M-00 LAUNCH** is a new mission, not a retrofit, and it starts *warm*: it is
+  a lesson in ascent, not in switchology. It takes a new id at the end of the
+  array and is displayed first, so no mission was renumbered, every saved
+  progress entry stays valid and no existing suite had to be rewritten.
+- **Direct insertion** into a 185 km circular parking orbit.
+- **Reentry with heating**, modelled against the existing hull and thermal
+  limit, and per-body atmospheres for Venus and Mars as well as Earth.
+- **Max-Q break-up and impact** are the two deaths. No abort modes.
+- Pitch is flown and displayed **against the local horizon**, one editable
+  preloaded program, manual `STAGE`, continuous `THR nn` defaulting to 100%,
+  jettisoned stages vanish, a T− count with HOLD/RESUME, and a CERES phasing
+  readout so there is a right moment to lift off.
+
+## Measured, not assumed
+
+| | |
+|---|---|
+| Max Q on the filed program | **35.0 kPa at 13.5 km** (design limit 40, break-up 56) |
+| Gravity + drag + steering losses | **1,506 m/s** of 8,066 m/s spent |
+| Ascent | first stage away T+141 s, MECO T+443 s at 185.0 km apoapsis |
+| Final orbit after `PLAN CIRC AP` | **181.8 × 185.1 km, e = 0.0003** |
+| Lunar arrival (unchanged) | 708 × 823 km |
+| Mars arrival (unchanged) | 229 × 1080 km at MET 344:08:49:17 |
+
+The shipped missions are proven untouched by A/B against the page that predates
+the atmosphere: M-02, M-05, M-08 and M-01-flown-as-briefed all come out
+**bit-for-bit identical** in position, velocity and mass.
+
+## The one deliberate behaviour change
+
+M-01 starts with its periapsis 900 km below the surface — that is the whole
+lesson. Left alone it has always come back down; before the atmosphere it did
+that through vacuum, and now the air gets it first. An abandoned M-01 ends up
+862 km from where it used to after an hour of doing nothing. The mission flown
+as briefed is bit-for-bit unchanged, and `launch.test.js` asserts both halves.
+
+## Not done
+
+- **Abort modes.** Ruled out of this item by decision.
+- **Automatic load shedding** and a thermal loop that drives hull temperature
+  in normal flight (would touch M-09) remain deferred from item 02.
+- The **partly-cold mission mechanism** built in item 02 is still unused by any
+  shipped mission. M-00 starts warm by decision.

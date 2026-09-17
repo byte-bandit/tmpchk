@@ -113,6 +113,24 @@ const { suite } = require('../harness');
        sysBad.join(' | ') || 'two pages of five systems');
     ok('still 12 function keys — SYS is a link too', g.pkCount===12);
 
+    // The launch pages are the newest and the densest: a pitch program is five
+    // altitude/pitch pairs with an edit key beside each, which is what pushed a
+    // value off the side of a 375 px screen once already.
+    await p.fill('#cmd','MIS 10'); await p.press('#cmd','Enter'); await p.waitForTimeout(300);
+    await p.fill('#cmd','LAUNCH'); await p.press('#cmd','Enter'); await p.waitForTimeout(300);
+    let lnchBad = [], seen = [];
+    for (let i=0;i<3;i++) {
+      const l = await p.evaluate(()=>({ title: document.getElementById('cdu-t').textContent.trim(),
+        scrollX: document.documentElement.scrollWidth > window.innerWidth+1,
+        clip: [...document.querySelectorAll('.fval, .flab')]
+          .filter(e=>e.textContent.trim() && e.scrollWidth > e.clientWidth + 1).map(e=>e.textContent.slice(0,30)) }));
+      seen.push(l.title);
+      if (l.scrollX || l.clip.length) lnchBad.push(l.title+':'+(l.clip.join(',')||'scroll'));
+      await p.__press('#pg-next'); await p.waitForTimeout(200);
+    }
+    ok('all three LAUNCH pages fit, labels and values', lnchBad.length===0,
+       lnchBad.join(' | ') || seen.join(' / '));
+
     ok('no page errors', errs.length===0, errs.join('|'));
     await ctx.close();
   }

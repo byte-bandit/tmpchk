@@ -18,6 +18,19 @@ function extract(file = GAME) {
   return [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n');
 }
 
+/* Bindings that only exist in newer copies of the page. A historical
+ * index.html booted for an A/B comparison does not have them, and asking for
+ * one there is a ReferenceError that would take the whole boot down — so each
+ * is exported individually, inside its own try. */
+const LATE = [
+  'setPad', 'ignite', 'jettisonStage', 'loadStage', 'stepLaunch', 'pitchCommand',
+  'pitchToTheta', 'currentPitch', 'launchWindow', 'dynPressure', 'airDensity',
+  'airPressure', 'dragAcc', 'inAtmosphere', 'curThrust', 'curIsp', 'curFlow',
+  'ASCENT_STACK', 'PITCH_DEFAULT', 'ASCENT_TIME', 'ASCENT_ARC', 'PARK_ALT',
+  'Q_BREAK', 'HEAT_NOSE', 'fmtCount', 'rosterList', 'ROSTER_ORDER', 'rig',
+  'burnStep', 'stepSystems', 'checkHazards', 'padPlace', 'ZEROV', 'stepCount',
+];
+
 function boot(file = GAME) {
   const LOG = [];
   let mkEl = (id) => ({
@@ -57,7 +70,7 @@ function boot(file = GAME) {
 ;globalThis.__G = {
   exec, loadMission, advance, derive, say, fmtMET, fmtT, fmtDist, fmtVel, fmtDV,
   BODIES, AU, TAU, V, el, elements, propagate, soiBody, craftMass, targetRel,
-  absState, bodyStateInParent, normAngle, vCirc, vAtR, tToApo, tToPeri,
+  absState, bodyStateInParent, normAngle, angDiff, vCirc, vAtR, tToApo, tToPeri,
   simBurn, coastEncounter, transferWindow, solveBurn, targetEncounter,
   setOrbit, MISSIONS, startBurn, timeToIgnition, rcsDV, dvRemaining,
   PAGES, CDU, PAGEKEYS, MSGS, gotoPage, renderCDU, fire, armSolution,
@@ -69,7 +82,8 @@ function boot(file = GAME) {
   sysFitted, stepSys, tripBus, alignLeft, ALIGN_TIME, ALIGN_DRIFT, ALIGN_OK, darkRows,
   get S(){ return S; }, get D(){ return D; },
   get CURRENT(){ return CURRENT; }, get spMessage(){ return spMessage; },
-};`);
+};
+` + LATE.map(n => `try { globalThis.__G.${n} = ${n}; } catch (e) {}`).join('\n'));
 
   const G = globalThis.__G;
   G.LOG = LOG;

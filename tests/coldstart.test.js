@@ -17,9 +17,13 @@ console.log('\nTHE GRAPH');
 loadMission(0);
 ok('free flight boots dark', SYSIDS.every(id => sysState(id) === 'OFF'),
    SYSIDS.map(id => sysState(id)).join(',').slice(0, 40));
-ok('and in eclipse, with the arrays stowed and nothing generating',
-   G.D.ecl && G.D.gen === 0 && !sysOn('ARRAY'), `gen ${G.D.gen} W`);
-ok('a fifth of the pack', Math.abs(S.power.batt / S.power.battMax - 0.2) < 0.01,
+ok('and it boots on the pad, held down, with the count stopped',
+   !!S.pad && !S.pad.lifted && S.pad.hold && S.pad.T < 0,
+   S.pad ? `T${G.fmtCount(S.pad.T)}` : 'no pad');
+ok('nothing is generating — the arrays are behind the fairing',
+   G.D.gen === 0 && S.fairing && !sysOn('ARRAY'), `gen ${G.D.gen} W`);
+ok('the pack is all the power there is until the fairing goes',
+   S.power.batt > 0 && S.power.batt < S.power.battMax,
    `${S.power.batt} / ${S.power.battMax} Wh`);
 ok('a dark vehicle draws nothing', G.D.load === 0, G.D.load + ' W');
 ok('every system except the battery has a prerequisite',
@@ -112,15 +116,19 @@ exec('PWR UP');
 until(() => !S.pwrUp, 900);
 ok('the auto sequence runs the same graph and takes the same time',
    allUp() && S.t > 3.5 * 60 && S.t < 5.5 * 60, fmtT(S.t));
-ok('and it cost real battery, in eclipse, off the pack',
-   S.power.batt < b0 && G.D.ecl && G.D.gen === 0,
+ok('and it cost real battery, on the pad, off the pack',
+   S.power.batt < b0 && G.D.gen === 0,
    `${b0.toFixed(0)} → ${S.power.batt.toFixed(0)} Wh`);
-const atSunrise = (() => { until(() => !G.D.ecl, 4000); return S.power.batt; })();
-ok('and the arrays are worth nothing until sunrise', atSunrise < b0 && G.D.gen > 1000,
-   `${atSunrise.toFixed(0)} Wh left, ${G.D.gen.toFixed(0)} W now coming in`);
-until(() => S.power.batt > S.power.battMax * 0.95, 4000);
-ok('after which the pack refills', S.power.batt > S.power.battMax * 0.95,
-   `${S.power.batt.toFixed(0)} / ${S.power.battMax} Wh`);
+// On the pad the arrays are worth nothing no matter where the Sun is: they are
+// folded behind a fairing. Deploy them and watch the number stay at zero.
+exec('START ARRAY');
+until(() => sysOn('ARRAY') || S.t > 1200, 1500);
+ok('deployed arrays still generate nothing behind the fairing',
+   G.D.gen === 0 && S.fairing, `${G.D.gen.toFixed(0)} W`);
+const beforeCount = S.power.batt;
+advance(300);
+ok('and idling in the count costs real charge',
+   S.power.batt < beforeCount, `${beforeCount.toFixed(0)} → ${S.power.batt.toFixed(0)} Wh`);
 
 /* ---------- 7. the alignment is a thing you watch, and can spoil ---------- */
 console.log('\nTHE ALIGNMENT');
