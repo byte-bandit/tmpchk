@@ -9,14 +9,33 @@ constraints and open questions.
 | [01](01-docking.md) | Realistic docking — attitude and mechanics both **done** | Done | — |
 | [02](02-cold-start.md) | Cold start and systems configuration | **Done** | — |
 | [03](03-launch.md) | Launch from Earth | **Done** | — |
-| [04](04-new-missions.md) | New missions | Awaiting examples | 01 / 03 per mission |
+| [04](04-cargo-and-return.md) | Cargo run: launch, deliver, come home | Not started | 01, 02, 03 |
+| [05](05-mars-round-trip.md) | Mars round trip: refuel, go, get home | Not started | 04 |
+| [06](06-lunar-landing.md) | Lunar landing from a mothership | Not started | 04 |
 
 Decisions taken: attitude is built inside item 01 scoped to docking's needs and
 extended when launch needs it; cold start and launch are separate items.
 
+Items 01–03 built the machinery. **Items 04–06 are the missions that use it** —
+full arcs that go somewhere and come back, rather than one manoeuvre each. They
+came from the user's three examples and were split so that each one ships
+something playable:
+
+| Example | Item | The new machinery it needs |
+|---|---|---|
+| Launch, dock, swap cargo, reenter, splash down | 04 | cargo mass, entry corridor, heat shield, parachutes, ordered phases, checkpoints |
+| Launch, dock, refuel, Mars flyby, return home | 05 | an encounter solver that works *inbound*, midcourse correction, years of consumables |
+| Launch, translunar, separate a lander, land | 06 | a mothership that becomes a docking target while you fly the lander |
+
+Decisions taken on these: the mothership becomes a passive docking target
+rather than a second simulated vehicle (which reuses item 01 wholesale); entry
+gets the full treatment — shield, two-sided corridor, chutes, splashdown; and a
+mission checkpoints at every phase, so an hour of flying is never lost to one
+mistake at phase nine.
+
 The north star is one continuous flight in FREE FLIGHT: cold start on the pad →
-launch → rendezvous → dock. Item 01 built the last leg and it works wherever a
-station exists, not only in M-03. Items 02 and 03 are the first two legs.
+launch → rendezvous → dock. Item 01 built the last leg, items 02 and 03 the
+first two, and FREE FLIGHT now flies all of it.
 
 ## Picking up an item
 
