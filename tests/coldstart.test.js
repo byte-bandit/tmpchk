@@ -221,31 +221,49 @@ ok('and is not fitted to one with no crew', !sysFitted('ECLSS') && sysState('ECL
    'M-01 carries ' + S.craft.crew + ' crew');
 ok('an uncrewed vehicle therefore draws less, never more', G.D.load === 315, G.D.load + ' W');
 
+/* Life support is REGENERATIVE (item 05). Running, the loop closes and the
+   tank is not touched at all; stopped, the crew are on the reserve and there
+   is no scrubbing, so it goes at four times what they actually breathe. The
+   oxygen clock only starts when the power stops. */
 loadMission(3);                                   // crewed, warm, life support running
 const o2a = S.craft.o2; advance(3600);
 const rateOn = o2a - S.craft.o2;
 exec('STOP ECLSS');
 const o2b = S.craft.o2; advance(3600);
 const rateOff = o2b - S.craft.o2;
-ok('with life support running the crew use one crew-hour each per hour',
-   Math.abs(rateOn - S.craft.crew) < 0.05, rateOn.toFixed(2) + ' crew-h/h');
-ok('with it off they burn emergency oxygen four times as fast',
-   Math.abs(rateOff - 4 * rateOn) < 0.1, rateOff.toFixed(2) + ' crew-h/h');
+ok('with the loop closed the reserve is not touched at all',
+   rateOn === 0, rateOn.toFixed(2) + ' crew-h/h with ' + S.craft.crew + ' aboard');
+ok('with it open they are on the reserve at four crew-hours an hour each',
+   Math.abs(rateOff - G.ECLSS_OPEN_RATE * S.craft.crew) < 0.1, rateOff.toFixed(2) + ' crew-h/h');
+ok('and the rate the page quotes is the rate it actually spends',
+   Math.abs(rateOff - S.craft.crew * G.o2Rate()) < 0.1,
+   `${G.o2Rate().toFixed(0)} crew-h/h each, loop ${G.eclssClosed() ? 'closed' : 'open'}`);
 
 loadMission(3);
-S.craft.o2 = S.craft.crew * 25;                   // a day and an hour of air
+exec('STOP ECLSS');                               // the reserve only moves with the loop down
+S.craft.o2 = S.craft.crew * G.ECLSS_OPEN_RATE * 25;      // a day and an hour of reserve
 advance(3700);
-ok('a day out, the crew are told', /CAUTION · OXYGEN/.test(out().join('\n').split('CAUTION · OXYGEN').length > 1 ? 'CAUTION · OXYGEN' : ''),
-   (out().filter(l => /OXYGEN/.test(l))[0] || 'none').slice(0, 52));
-S.craft.o2 = S.craft.crew * 4.5;
+ok('a day out, the crew are told', out().some(l => /CAUTION · OXYGEN RESERVE/.test(l)),
+   (out().filter(l => /OXYGEN RESERVE/.test(l))[0] || 'none').slice(0, 52));
+S.craft.o2 = S.craft.crew * G.ECLSS_OPEN_RATE * 4.5;
 advance(2000);
 ok('four hours out, again and louder',
-   out().some(l => /WARNING · OXYGEN/.test(l)),
-   (out().filter(l => /WARNING · OXYGEN/.test(l))[0] || 'none').slice(0, 52));
+   out().some(l => /WARNING · OXYGEN RESERVE/.test(l)),
+   (out().filter(l => /WARNING · OXYGEN RESERVE/.test(l))[0] || 'none').slice(0, 52));
 S.craft.o2 = S.craft.crew * 0.02;
 advance(300);
-ok('and running out ends the flight', S.status === 'lost' && /oxygen exhausted/i.test(out().join('\n').slice(-400)),
+ok('and running the reserve out with the loop down ends the flight',
+   S.status === 'lost' && /oxygen reserve exhausted/i.test(out().join('\n').slice(-400)),
    S.status + ' — ' + (out().filter(l => /CREW LOST/.test(l))[0] || '').slice(0, 44));
+
+/* The point of the change: with the loop closed, the same empty tank is not
+   fatal, because nothing is drawing on it. */
+loadMission(3);
+S.craft.o2 = 0;
+advance(7200);
+ok('an empty reserve is survivable while the loop is closed',
+   S.status === 'flight' && G.eclssClosed(),
+   `${(7200/3600).toFixed(0)} h on a dry tank, loop closed, status ${S.status}`);
 
 /* ---------- 11. every crewed mission has air to spare ---------- */
 console.log('\nOXYGEN MARGINS');
@@ -272,7 +290,7 @@ for (const m of MISSIONS) {
   warmLoads.push([m.code, G.D.load, allUp(), S.craft.crew]);
 }
 ok('the cold-start missions are the ones that ask to be',
-   MISSIONS.filter(m => m.sys).map(m => m.code).sort().join(',') === 'FREE,M-10',
+   MISSIONS.filter(m => m.sys).map(m => m.code).sort().join(',') === 'FREE,M-10,M-11',
    MISSIONS.filter(m => m.sys).map(m => m.code).join(',') || 'none');
 ok('every scripted mission still boots with everything running',
    warmLoads.every(w => w[2]), warmLoads.filter(w => !w[2]).map(w => w[0]).join(',') || 'all warm');

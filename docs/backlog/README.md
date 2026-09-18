@@ -10,8 +10,9 @@ constraints and open questions.
 | [02](02-cold-start.md) | Cold start and systems configuration | **Done** | — |
 | [03](03-launch.md) | Launch from Earth | **Done** | — |
 | [04](04-cargo-and-return.md) | Cargo run: launch, deliver, come home | **Done** | 01, 02, 03 |
-| [05](05-mars-round-trip.md) | Mars round trip: refuel, go, get home | Not started | 04 |
+| [05](05-mars-round-trip.md) | Mars round trip: refuel, go, get home | **Done** (ends in Earth orbit) | — |
 | [06](06-lunar-landing.md) | Lunar landing from a mothership | Not started | 04 |
+| 07 | Lambert solver, and bringing an interplanetary return down | Not started | 05 |
 
 Decisions taken: attitude is built inside item 01 scoped to docking's needs and
 extended when launch needs it; cold start and launch are separate items.

@@ -34,6 +34,9 @@ const LATE = [
   'SHIELD_LOAD', 'SHIELD_RATE', 'CARGO_BAND', 'CARGO_RATE', 'stepCargo', 'airRelative',
   'curPhase', 'checkPhases', 'takeCheckpoint', 'restoreCheckpoint', 'lastCheckpoint',
   'snapState', 'completeMission',
+  // item 05: the Kepler convergence guard, the inbound targeter and life support
+  'keplerStep', 'KEPLER_TOL', 'CHILDREN', 'trimEncounter', 'o2Rate', 'eclssClosed',
+  'ECLSS_OPEN_RATE', 'TRIM_LEAD', 'SYSDEF',
 ];
 
 function boot(file = GAME) {
@@ -87,6 +90,7 @@ function boot(file = GAME) {
   sysFitted, stepSys, tripBus, alignLeft, ALIGN_TIME, ALIGN_DRIFT, ALIGN_OK, darkRows,
   get S(){ return S; }, get D(){ return D; },
   get CURRENT(){ return CURRENT; }, get spMessage(){ return spMessage; },
+  get keplerSplits(){ return keplerSplits; },
 };
 ` + LATE.map(n => `try { globalThis.__G.${n} = ${n}; } catch (e) {}`).join('\n'));
 

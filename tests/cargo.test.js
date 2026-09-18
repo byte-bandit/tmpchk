@@ -513,18 +513,28 @@ console.log('\nM-10 CARGO RUN, END TO END');
   ok('phase 5 · hard dock', s.phases[4].done && s.dock.phase === 'HARD',
      `${s.dock.latches} latches, MET ${g.fmtMET(s.t)}`);
 
-  g.exec('DOCK EQUALISE');
-  n = 0; while (n++ < 20000 && s.dock.vest.press < 101) g.advance(1);
-  g.exec('DOCK EQUALISE'); g.exec('DOCK LEAK');
-  n = 0; while (n++ < 20000 && !s.dock.vest.verdict) g.advance(1);
-  if (s.dock.vest.verdict !== 'PASS') {
-    g.exec('DOCK RESEAT');
-    n = 0; while (n++ < 20000 && s.dock.phase !== 'HARD') { if (s.dock.phase === 'RETRACTED') g.exec('DOCK LATCH'); g.advance(0.5); }
+  // The seal is rolled fresh on every seating and fails about one time in six
+  // after a clean capture — that is deliberate, and docking.test.js measures it
+  // at 17.2% over 4,000 seatings. Re-seating ONCE therefore leaves this whole
+  // flight failing about 3% of the time, which is a coin toss hidden inside the
+  // suite that gates every release. The game's own promise is that a failed
+  // seal is never a dead end, so the test flies it the way a crew would: keep
+  // re-seating until the vestibule holds.
+  const proveTheSeal = () => {
     g.exec('DOCK EQUALISE');
     n = 0; while (n++ < 20000 && s.dock.vest.press < 101) g.advance(1);
     g.exec('DOCK EQUALISE'); g.exec('DOCK LEAK');
     n = 0; while (n++ < 20000 && !s.dock.vest.verdict) g.advance(1);
+    return s.dock.vest.verdict === 'PASS';
+  };
+  let seatings = 1;
+  while (!proveTheSeal() && seatings < 12) {
+    seatings++;
+    g.exec('DOCK RESEAT');
+    n = 0; while (n++ < 20000 && s.dock.phase !== 'HARD') { if (s.dock.phase === 'RETRACTED') g.exec('DOCK LATCH'); g.advance(0.5); }
   }
+  ok('the vestibule seal is proven, re-seating as often as it takes',
+     s.dock.vest.leakOk, seatings === 1 ? 'first seating held' : `held on seating ${seatings}`);
   g.exec('DOCK HATCH');
   const massDocked = g.craftMass();
   g.exec('DOCK UNLOAD');
@@ -584,14 +594,20 @@ function lastCheckpointName(s) {
 
 /* ---------- 11. the roster did not get renumbered ---------- */
 console.log('\nTHE ROSTER');
-ok('M-10 took the one free id', G.MISSIONS.filter(m => m.id === 11).length === 1 &&
-   G.MISSIONS.map(m => m.id).sort((a, b) => a - b).join(',') === '0,1,2,3,4,5,6,7,8,9,10,11',
+// Item 05 added M-11 on id 12, the next free one. M-10 keeps id 11 and no
+// mission before it was renumbered — the ids live in the flight record.
+ok('M-10 kept the id it took, and M-11 took the next free one',
+   G.MISSIONS.filter(m => m.id === 11).length === 1 &&
+   G.MISSIONS.find(m => m.id === 12) && G.MISSIONS.find(m => m.id === 12).code === 'M-11' &&
+   G.MISSIONS.map(m => m.id).sort((a, b) => a - b).join(',') === '0,1,2,3,4,5,6,7,8,9,10,11,12',
    G.MISSIONS.map(m => m.id).join(','));
 ok('and no other mission was renumbered',
    G.MISSIONS.find(m => m.id === 10).code === 'M-00' && G.MISSIONS.find(m => m.id === 0).code === 'FREE');
 ok('M-09 now chains forwards to it instead of backwards to the launch tutorial',
    G.MISSIONS.find(m => m.id === 9).next === 11);
 ok('the roster runs the ladder and ends with the sandbox',
-   G.ROSTER_ORDER.join(',') === '10,1,2,3,4,5,6,7,8,9,11,0', G.ROSTER_ORDER.join(','));
+   G.ROSTER_ORDER.join(',') === '10,1,2,3,4,5,6,7,8,9,11,12,0', G.ROSTER_ORDER.join(','));
+ok('and M-10 chains forwards to the Mars round trip',
+   G.MISSIONS.find(m => m.id === 11).next === 12);
 
 T.done('cargo, entry and phases: all checks passed');

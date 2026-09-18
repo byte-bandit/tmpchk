@@ -263,8 +263,12 @@ ok('it charges instead', S.power.batt > b1, '+' + (S.power.batt - b1).toFixed(1)
 
 /* ---------- 8. ECLSS has to be worth pressing too ---------- */
 console.log('\nECLSS');
+// The loop is regenerative (item 05): with ECLSS running the reserve does not
+// move. Stop it and the crew are on the tank — which is what the station's air
+// then takes back over.
+exec('STOP ECLSS');
 const o2a = S.craft.o2; advance(3600);
-ok('the crew breathe their own O₂ down', S.craft.o2 < o2a,
+ok('with the loop down the crew draw on their own reserve', S.craft.o2 < o2a,
    `${o2a.toFixed(1)} → ${S.craft.o2.toFixed(1)} crew-hours in an hour with ${S.craft.crew} aboard`);
 exec('DOCK DUCT'); exec('DOCK FAN');
 const o2b = S.craft.o2; advance(3600);

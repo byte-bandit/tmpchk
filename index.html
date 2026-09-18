@@ -447,9 +447,24 @@ function stumpffS(z){
 
 /* ---- universal-variable two-body propagation ---------------
    Exact for ellipse, parabola and hyperbola alike, which is what
-   lets time warp jump hours in a single step without drift.     */
-function propagate(r0v, v0v, mu, dt) {
-  if (dt === 0) return { r:{...r0v}, v:{...v0v} };
+   lets time warp jump hours in a single step without drift.
+
+   ONE step, and it says whether it worked. Newton's method on the universal
+   anomaly is not globally convergent: on a strongly hyperbolic arc it can walk
+   away from the root instead of toward it, and the iteration then ends on a
+   finite number that is not a solution of anything. Measured, on the arrival
+   hyperbola at Mars' sphere of influence (e = 1.7165, periapsis 4,470 km,
+   starting 468,228 km out), a single step of 1,764 s returns |r| = 2.39e9 km
+   where the truth is 4.635e5 km, with the orbital energy off by 100%. A step
+   of 1,000 s is exact to 1e-9 km and one of 3,529 s to 1e-10; the divergence
+   sits in a band and depends on the starting radius as much as on dt, which is
+   why it looks like a warp-dependent coin toss from the outside.
+
+   A finite wrong answer is worse than no answer, because nothing downstream
+   can tell. So the residual is checked and handed back. `propagate` is what
+   turns a failure into a correct result.                                   */
+const KEPLER_TOL = 1e-9;       // on |F| relative to the step's own scale
+function keplerStep(r0v, v0v, mu, dt) {
   const r0 = V.len(r0v), v0 = V.len(v0v);
   const vr0 = V.dot(r0v, v0v) / r0;
   const alpha = 2/r0 - v0*v0/mu;           // 1/a
@@ -479,6 +494,13 @@ function propagate(r0v, v0v, mu, dt) {
   }
 
   const z = alpha*x*x, C = stumpffC(z), S = stumpffS(z);
+  // The residual of the very equation Newton was solving, measured against the
+  // size of the terms that make it up. Scaling by those terms rather than by a
+  // fixed number is what makes one tolerance work for a 6,771 km parking orbit
+  // and a 228,000,000 km heliocentric cruise alike.
+  const F     = r0*vr0/sq*x*x*C + (1-alpha*r0)*x*x*x*S + r0*x - sq*dt;
+  const scale = Math.max(Math.abs(sq*dt), Math.abs(r0*x),
+                         Math.abs(r0*vr0/sq*x*x*C), Math.abs((1-alpha*r0)*x*x*x*S), 1e-30);
   const f = 1 - x*x/r0*C;
   const g = dt - x*x*x/sq*S;
   const R = V.add(V.mul(r0v,f), V.mul(v0v,g));
@@ -486,9 +508,34 @@ function propagate(r0v, v0v, mu, dt) {
   const fd = sq/(rm*r0) * (alpha*x*x*x*S - x);
   const gd = 1 - x*x/rm*C;
   const Vv = V.add(V.mul(r0v,fd), V.mul(v0v,gd));
-  if (!isFinite(R.x)||!isFinite(R.y)||!isFinite(Vv.x)||!isFinite(Vv.y))
-    return { r:{...r0v}, v:{...v0v} };
-  return { r:R, v:Vv };
+  const good = isFinite(R.x) && isFinite(R.y) && isFinite(Vv.x) && isFinite(Vv.y)
+            && isFinite(F) && Math.abs(F) <= KEPLER_TOL * scale;
+  return { r:R, v:Vv, ok:good };
+}
+
+/** Propagate, and never hand back a step that did not converge.
+    Sub-stepping is the fallback because the failure is in Newton's starting
+    guess, not in the physics: halve the interval and each half starts from a
+    better guess. Measured on the Mars flyby, every failure in the band clears
+    at two sub-steps, and the loop is capped so a pathological case ends as the
+    old code did — with the state unchanged — rather than hanging. */
+const KEPLER_SPLIT_MAX = 4096;
+let keplerSplits = 0;          // how often the fallback has been needed
+function propagate(r0v, v0v, mu, dt) {
+  if (dt === 0) return { r:{...r0v}, v:{...v0v} };
+  const one = keplerStep(r0v, v0v, mu, dt);
+  if (one.ok) return { r:one.r, v:one.v };
+  for (let n = 2; n <= KEPLER_SPLIT_MAX; n *= 2) {
+    const h = dt/n;
+    let r = {...r0v}, v = {...v0v}, bad = false;
+    for (let i = 0; i < n; i++) {
+      const p = keplerStep(r, v, mu, h);
+      if (!p.ok) { bad = true; break; }
+      r = p.r; v = p.v;
+    }
+    if (!bad) { keplerSplits++; return { r, v }; }
+  }
+  return { r:{...r0v}, v:{...v0v} };
 }
 
 /* ---- orbital elements from a state vector ------------------ */
@@ -569,7 +616,8 @@ const S = {
   therm: { hull:20 },
   loads: { HEAT:true, SCI:false, COMM:true },
   ledger: { dvUsed:0, burns:0 },
-  flags: { lunarSOI:false, perihelionPassed:false },
+  flags: { lunarSOI:false, perihelionPassed:false, marsSOI:false, earthDeparted:false },
+  depot: null,
   landingAllowed: false, thermLimit: 800, completed: false, pauseAfterBurn: false,
   solution: null, planName: '', planDetail: '', burnSel: { dir:'PRO', at:'AP', dur:0 },
   // Attitude is real state now: a planar sim, so one angle plus its rate.
@@ -910,7 +958,10 @@ function loadStage(i) {
   for (let k = i + 1; k < c.stages.length; k++) upper += c.stages[k].dry + c.stages[k].fuel;
   c.stageIx = i;
   c.dry = c.payload + st.dry + upper;
-  c.fuel = st.fuel; c.fuelMax = st.fuel;
+  // A stage's capacity is its load unless it says otherwise. Only a spacecraft
+  // built to be filled in orbit says otherwise, so every launch stage — and
+  // every vehicle that shipped before the depot existed — is unchanged.
+  c.fuel = st.fuel; c.fuelMax = st.fuelMax != null ? st.fuelMax : st.fuel;
   c.thrust = st.thrust; c.isp = st.isp;
   c.thrustSL = st.thrustSL != null ? st.thrustSL : null;
   c.ispSL = st.ispSL != null ? st.ispSL : null;
@@ -1048,6 +1099,35 @@ function derive() {
   };
 }
 
+/* ---- life support ------------------------------------------
+   Scrubbing CO₂ and making oxygen are two different jobs, and conflating them
+   is why a tank used to be the thing that limited a flight.
+
+   A lithium hydroxide canister takes CO₂ out of the air and produces no oxygen
+   at all. That is Apollo, and it is why Apollo still carried tanks. What this
+   vehicle carries is the other kind: a REGENERATIVE loop — electrolysis of
+   water for oxygen, with the CO₂ reduced to recover the oxygen bound up in it
+   and give the water back. It does not consume a stored gas. It consumes
+   POWER, and it is fitted to every crewed vehicle in the game, because every
+   crewed vehicle in the game is meant to be able to go somewhere.
+
+   So the tank stops being the clock on the mission and becomes what it is on a
+   real spacecraft: a reserve. It is spent when the loop is not running — off,
+   or the bus tripped, or still warming up — and it is spent on cycling the
+   vestibule. Which means the oxygen clock only starts when the POWER stops,
+   and a bus trip three years from home is a different kind of frightening than
+   a number that was always counting down anyway.
+
+   The open-loop rate is unchanged at four crew-hours an hour. Without the loop
+   there is no scrubbing either, so cabin air has to be flushed and replaced
+   rather than cleaned — the reserve goes four times faster than the crew
+   actually breathe. Nothing about a shipped mission's emergency got easier. */
+const ECLSS_OPEN_RATE = 4;     // crew-hours of reserve per crew per hour, loop down
+/** True while the regenerative loop is closed and the tank is not being touched. */
+function eclssClosed() { return sysOn('ECLSS'); }
+/** Crew-hours of reserve spent per crew per hour, right now. */
+function o2Rate() { return S.dock.air.fan ? 0 : (eclssClosed() ? 0 : ECLSS_OPEN_RATE); }
+
 /* ---- power / thermal integration --------------------------- */
 /** Effective nose radius, m. Bluntness is what a heat shield buys you. */
 const HEAT_NOSE = 4;
@@ -1063,14 +1143,12 @@ function stepSystems(dt) {
   // them, and "nothing is unrecoverable" would stop being true.
   if (S.power.batt <= 0 && net < 0) tripBus();
   stepSys(dt);
-  // Breathing is only free once the station's air is ducted through the hatch.
-  // With life support running the crew use one crew-hour per hour, exactly as
-  // before. With it off they are on emergency oxygen and burn through it four
-  // times as fast — which is what makes ECLSS part of the power-up and not
-  // just another switch.
+  // Breathing costs nothing while the loop is closed and nothing while the
+  // station's air is ducted through the hatch. It costs the reserve the moment
+  // either stops — which is what makes ECLSS part of the power-up rather than
+  // just another switch, and what ties the crew's survival to the bus.
   if (S.craft.crew && !S.dock.air.fan) {
-    const rate = sysOn('ECLSS') ? 1 : 4;
-    S.craft.o2 = Math.max(0, S.craft.o2 - S.craft.crew * rate * dt / 3600);
+    S.craft.o2 = Math.max(0, S.craft.o2 - S.craft.crew * o2Rate() * dt / 3600);
   }
   // radiative equilibrium, relaxed
   let eq = Math.pow(Math.max(D.flux,1) * 0.28 / (4 * 5.670374e-8 * 0.85), 0.25) - 273.15;
@@ -1490,13 +1568,26 @@ function stepDock(dt) {
   if (pr.xfer) {
     if (!dk.pwr.tie) { pr.xfer = false; say('TRANSFER STOPPED — the pumps lost the station bus.', 'warn'); }
     else {
-      let q = 0.5 * dt;                                 // kg/s through the coupling
+      // A station with a DEPOT has a finite quantity aboard and taking it all
+      // leaves nothing behind. A station without one is a bottomless tap, which
+      // is what every mission before this assumed and still gets.
+      const rate = S.depot && S.depot.rate ? S.depot.rate : 0.5;      // kg/s
+      let q = rate * dt;
+      if (S.depot) q = Math.min(q, S.depot.prop);
+      const had = q;
       const mainRoom = Math.max(0, S.craft.fuelMax - S.craft.fuel);
       const take = Math.min(q, mainRoom); S.craft.fuel += take; q -= take;
       const rcsRoom = Math.max(0, S.craft.rcsMax - S.craft.rcs);
       const take2 = Math.min(q, rcsRoom); S.craft.rcs += take2; q -= take2;
       pr.moved += take + take2;
-      if (q > 0) { pr.xfer = false; pr.done = true; say(`TRANSFER COMPLETE · ${pr.moved.toFixed(1)} kg aboard, tanks full.`, 'ok'); }
+      if (S.depot) S.depot.prop = Math.max(0, S.depot.prop - (take + take2));
+      if (S.depot && S.depot.prop <= 1e-9 && q <= 0) {
+        pr.xfer = false; pr.done = true;
+        say(`DEPOT DRY · ${pr.moved.toFixed(0)} kg aboard and ${S.depot.name || 'the depot'} has nothing left to give. `
+          + `${S.craft.fuel.toFixed(0)} of ${S.craft.fuelMax.toFixed(0)} kg in the main tank. `
+          + `Whatever you fly from here, you fly on that.`, 'warn');
+      }
+      else if (q > 0 && had > 0) { pr.xfer = false; pr.done = true; say(`TRANSFER COMPLETE · ${pr.moved.toFixed(1)} kg aboard, tanks full.`, 'ok'); }
     }
   }
   stepCargo(dt);
@@ -2105,17 +2196,19 @@ function checkHazards() {
     } else if (mins > 25) S.warnedBus = false;
   } else S.warnedBus = false;
 
-  // Air. Oxygen depletes for real, and running out now ends the flight — so it
-  // is called a day out, again four hours out, and the endurance sits on the
-  // LIFE page the whole time. Nobody should ever be surprised by this.
+  // Air. The reserve only moves while the loop is down, so the warnings are
+  // about the loop being down — which is the thing the crew can act on. A
+  // closed loop is not warned about at all, because there is nothing to say.
   if (S.craft.crew > 0) {
-    const hrs = S.craft.o2 / S.craft.crew;
-    if (S.craft.o2 <= 0)
-      return loseMission(`CREW LOST — oxygen exhausted after ${fmtMET(S.t)}. ${S.craft.crew} aboard, and the tanks are dry.`);
+    const rate = o2Rate();
+    const hrs = rate > 0 ? S.craft.o2 / (S.craft.crew * rate) : Infinity;
+    if (S.craft.o2 <= 0 && rate > 0)
+      return loseMission(`CREW LOST — oxygen reserve exhausted after ${fmtMET(S.t)}. `
+        + `${S.craft.crew} aboard, the regenerative loop was not running, and the tanks are dry.`);
     if (hrs < 4 && S.o2Warn < 2) { S.o2Warn = 2;
-      say(`WARNING · OXYGEN ${fmtT(hrs*3600)} REMAINING — ${sysOn('ECLSS') ? 'this is the last of it' : 'life support is OFF and the crew are on emergency oxygen at four times the rate'}. Get onto a station\'s ECLSS or end the flight.`, 'err'); }
+      say(`WARNING · OXYGEN RESERVE ${fmtT(hrs*3600)} REMAINING — the regenerative loop is not running and the crew are on the tank at ${ECLSS_OPEN_RATE}× their own rate. Bring ECLSS up, get onto a station's air, or end the flight.`, 'err'); }
     else if (hrs < 24 && S.o2Warn < 1) { S.o2Warn = 1;
-      say(`CAUTION · OXYGEN ${fmtT(hrs*3600)} REMAINING for ${S.craft.crew} crew.${sysOn('ECLSS') ? '' : ' Life support is OFF — bring ECLSS up and the rate drops to a quarter.'}`, 'warn'); }
+      say(`CAUTION · OXYGEN RESERVE ${fmtT(hrs*3600)} REMAINING for ${S.craft.crew} crew. Life support is not closing the loop — bring ECLSS up and the reserve stops moving altogether.`, 'warn'); }
     else if (hrs >= 24 && S.o2Warn) S.o2Warn = 0;
   }
 
@@ -3151,14 +3244,29 @@ function coastEncounter(r0, v0, soi0, t0, tk, maxT) {
  * at a body's orbital radius is a collision course; this searches ignition time
  * for a trajectory that arrives with a usable periapsis.
  */
-function targetEncounter(tk) {
+function targetEncounter(tk, goalOverride) {
   const b = soiBody(), mu = b.mu, tb = BODIES[tk];
   const w = transferWindow(tk);
   if (!w || w.wait < 0 || !isFinite(w.wait)) return null;
   const mode = w.dv1 >= 0 ? 'PRO' : 'RET';
   const e = el();
   const tof = w.tof;
-  const goal = Math.max(800, tb.R * 0.50);      // ~870 km over the Moon: clears the surface with room to spare
+  // Which end of the transfer ellipse the burn is steering.
+  //
+  // OUTBOUND the burn is prograde and it raises APOAPSIS to the target's
+  // orbit. INBOUND it is retrograde and it lowers PERIAPSIS to it — apoapsis
+  // does not move at all. Measured from a circular orbit at Mars' distance:
+  // 0, 300 and 900 s of retrograde all leave apoapsis at 1.5237 AU while
+  // periapsis falls 1.5237 → 1.3357 → 0.8728 AU. Asking `solveBurn` to drive
+  // apoapsis to 1 AU from there is asking for a number no burn duration can
+  // reach, so `f(lo) === f(hi)`, the target is outside the bracket, and it
+  // returns before the search for an ignition time has begun. That — not the
+  // span, not the aim point, not the scan resolution — is why a transfer home
+  // used to fall back to the analytic window with a shrug about a midcourse
+  // trim the game had no way to fly.
+  const inbound = w.r2 < w.r1;
+  const metric = inbound ? ((oe) => oe.rp) : ((oe) => isFinite(oe.ra) ? oe.ra : 1e12);
+  const goal = goalOverride != null ? goalOverride : Math.max(800, tb.R * 0.50);      // ~870 km over the Moon: clears the surface with room to spare
   // One departure period sweeps every transfer orientation. Note how steep this
   // is: shifting ignition by a minute rotates the transfer's apsidal line ~4°,
   // which moves the arrival point by tens of thousands of kilometres. So scan
@@ -3177,42 +3285,192 @@ function targetEncounter(tk) {
   const qOf = (res) => !res ? Infinity : (res.entered ? res.periAlt : res.miss - tb.R);
 
   let best = null;
+  // What disqualifies an arrival is hitting the body, not being low over it.
+  // The old test rejected anything under 50 km, which was written when every
+  // arrival was a capture from above — and which makes most of the published
+  // entry corridor (−40 to +80 km) unreachable by construction. A periapsis
+  // below the surface is an impact; a periapsis above it is an aim point.
+  // When two candidates both land on the aim point, the cheaper one wins.
+  // Without this the aim-point ladder can return a solution that reaches the
+  // target by digging far deeper into the Sun's well than it needs to:
+  // measured on the return from a Mars flyby, the k = 1.30 rung arrives just as
+  // well as k = 1.00 and costs 5,077 m/s against 2,834. AIM_TIE is a few
+  // kilometres over a body thousands of kilometres across — inside it, two
+  // arrivals are the same arrival, and only the propellant separates them.
+  // It applies only to the WIDE sweep below, never to the first one. The first
+  // sweep is the code every shipped mission walks, and a tie-break there moves
+  // M-08's arrival from 229 × 1080 km to 233 × 1089 km — measured. Nothing
+  // that already works is allowed to change to make something else better.
+  const AIM_TIE = 25;
+  let tieBreak = false;
   const consider = (tI, dur, res) => {
     const q = qOf(res);
     if (!isFinite(q)) return;
-    const sc = (q < 50 ? 1e6 + Math.abs(q) : Math.abs(q - goal));
-    if (!best || sc < best.sc) best = { tI, dur, res, sc, q };
+    const sc = (q <= 0 ? 1e6 + Math.abs(q) : Math.abs(q - goal));
+    const tie = tieBreak ? AIM_TIE : 0;
+    if (!best || sc < best.sc - tie || (tie > 0 && sc < best.sc + tie && dur < best.dur))
+      best = { tI, dur, res, sc, q };
   };
 
-  for (const k of [1.0, 1.12, 1.30]) {
-    const sk = solveBurn('XFER', mode, (oe) => isFinite(oe.ra) ? oe.ra : 1e12, w.r2*k, tk);
-    if (!sk || sk.dur == null) continue;
-    const dur = sk.dur, N = 140;
-    const ts = [], qs = [];
-    for (let i = 0; i <= N; i++) {
-      const tI = w.wait + (i/N - 0.5) * span;
-      const res = trial(tI, dur);
-      ts.push(tI); qs.push(qOf(res)); consider(tI, dur, res);
-    }
-    // bisect every bracket that straddles the aim point
-    for (let i = 0; i < N; i++) {
-      const q0 = qs[i], q1 = qs[i+1];
-      if (!isFinite(q0) || !isFinite(q1)) continue;
-      if ((q0 - goal) * (q1 - goal) > 0) continue;
-      let lo = ts[i], hi = ts[i+1], flo = q0;
-      for (let n = 0; n < 40; n++) {
-        const mid = (lo + hi)/2, res = trial(mid, dur), qm = qOf(res);
-        consider(mid, dur, res);
-        if (!isFinite(qm)) break;
-        if ((flo - goal) * (qm - goal) <= 0) hi = mid; else { lo = mid; flo = qm; }
-        if (Math.abs(qm - goal) < 5) break;
+  /** One sweep of ignition time across `sp` seconds, at `N` samples. */
+  const sweep = (sp, N) => {
+    for (const k of [1.0, 1.12, 1.30]) {
+      // Aim a little BEYOND the target's orbit going out, a little INSIDE it
+      // coming in: either way the ladder walks the arrival away from a grazing
+      // tangent, where the geometry is worst conditioned.
+      const sk = solveBurn('XFER', mode, metric, inbound ? w.r2/k : w.r2*k, tk);
+      if (!sk || sk.dur == null) continue;
+      const dur = sk.dur;
+      const ts = [], qs = [];
+      for (let i = 0; i <= N; i++) {
+        const tI = w.wait + (i/N - 0.5) * sp;
+        const res = trial(tI, dur);
+        ts.push(tI); qs.push(qOf(res)); consider(tI, dur, res);
       }
+      // bisect every bracket that straddles the aim point
+      for (let i = 0; i < N; i++) {
+        const q0 = qs[i], q1 = qs[i+1];
+        if (!isFinite(q0) || !isFinite(q1)) continue;
+        if ((q0 - goal) * (q1 - goal) > 0) continue;
+        let lo = ts[i], hi = ts[i+1], flo = q0;
+        for (let n = 0; n < 40; n++) {
+          const mid = (lo + hi)/2, res = trial(mid, dur), qm = qOf(res);
+          consider(mid, dur, res);
+          if (!isFinite(qm)) break;
+          if ((flo - goal) * (qm - goal) <= 0) hi = mid; else { lo = mid; flo = qm; }
+          if (Math.abs(qm - goal) < 5) break;
+        }
+      }
+      if (best && best.sc < 30) break;
     }
-    if (best && best.sc < 30) break;
+  };
+  sweep(span, 140);
+  // A SECOND, WIDER SWEEP, and only when the first one did not find an
+  // arrival worth having.
+  //
+  // `span` above reads "one departure period sweeps every transfer
+  // orientation" and then takes the smaller of that and a sixth of the flight
+  // time, which for anything slower than a lunar transfer is the sixth. From a
+  // CIRCULAR departure orbit that is enough, because the analytic window is
+  // already nearly right and the answer sits beside it — which is why every
+  // mission that shipped before finds its encounter inside it and is left
+  // exactly as it was. From an ECCENTRIC one it is not: `transferWindow`
+  // computes its phase angle from wherever the vehicle happens to be on its
+  // ellipse, so the good ignition time can be months from the analytic guess.
+  // Measured on the orbit a Mars flyby leaves behind (1.240 × 1.602 AU,
+  // e = 0.1274, period 619 d): the shipped 36.3-day span gets no closer than
+  // 371,928 km, and a sweep of the full 619-day period lands on the aim point
+  // exactly, in 935 trajectory evaluations.
+  if (!best || !best.res || !best.res.entered || best.sc >= 30) {
+    const wide = 1.1 * Pc;
+    if (wide > span * 1.5) {
+      // Start the wide sweep from nothing so the tie-break can pick a cheaper
+      // arrival than the narrow one settled for — but never hand back less
+      // than the narrow sweep already had.
+      const narrow = best;
+      best = null; tieBreak = true;
+      sweep(wide, 300);
+      const got = (c) => c && c.res && c.res.entered;
+      if (!best || (got(narrow) && !got(best)) || (got(narrow) && got(best) && best.sc > narrow.sc + AIM_TIE))
+        best = narrow;
+    }
   }
   if (!best || !best.res || !best.res.entered) return best ? { dur:best.dur, mode, tIgn:best.tI, arrival:best.res, dv:w.dv1, tof, window:w } : null;
   const dur = best.dur;
   return { dur, mode, tIgn:best.tI, arrival:best.res, dv:w.dv1, tof, window:w };
+}
+
+/**
+ * A midcourse trim.
+ *
+ * `targetEncounter` asks what burn would put you on a transfer. This asks what
+ * burn fixes the approach you are already flying — the same machinery pointed
+ * at the trajectory you are on rather than one you might fly.
+ *
+ * It answers two questions with one method, because they are the same question
+ * at two ranges:
+ *
+ *   FAR  — the target is another body under the same primary, and the thing
+ *          being moved is the closest approach on the coast to it.
+ *   NEAR — the target IS the primary, you are on the hyperbola in toward it,
+ *          and the thing being moved is your own periapsis. `PLAN PERI` cannot
+ *          do this: it burns at apoapsis, and an incoming hyperbola has none.
+ *
+ * NEAR is not a nicety. Measured on the flight home from Mars: the transfer
+ * solver predicts a 3,204 km arrival over Earth and the flight enters Earth's
+ * sphere of influence at exactly 3,204 km — the solver is not drifting at all.
+ * What then happens is that the vehicle passes through the MOON's sphere of
+ * influence on the way in, and comes out the far side with its periapsis at
+ * −2,205 km: an impact. `coastEncounter` stops at the target's SOI edge and
+ * knows nothing about the target's own moons, so no transfer solver can see
+ * that coming. The trim is how you fly out of it.
+ *
+ * Ignition is a fixed lead rather than a node, because on an approach there is
+ * no node — the player fires when the console says to.
+ */
+const TRIM_LEAD = 300;                     // s of warning before a trim lights
+function trimEncounter(tk, goalOverride, lead) {
+  const b = soiBody(), mu = b.mu, tb = BODIES[tk];
+  const near = (tk === S.soi);
+  if (!tb || (!near && tb.parent !== S.soi)) return null;
+  const L = lead != null ? lead : TRIM_LEAD;
+  const goal = goalOverride != null ? goalOverride : Math.max(800, tb.R * 0.50);
+  // Far enough ahead to find the approach, not so far that a second lap of the
+  // target's orbit is searched as well.
+  const horizon = (tb.period || 0) * 1.5;
+  const qOf = (res) => !res ? Infinity
+            : res.own ? res.periAlt
+            : (res.entered ? res.periAlt : res.miss - tb.R);
+  const trial = (mode, dur) => {
+    const st = propagate(S.r, S.v, mu, L);
+    const o = dur > 1e-9 ? simBurn(st.r, st.v, mu, mode, dur, craftMass())
+                         : { r:st.r, v:st.v };
+    if (near) {
+      const oe = elements(o.r, o.v, mu);
+      return { own:true, entered:true, periAlt: oe.rp - b.R, ecc: oe.e, t: S.t + L + dur };
+    }
+    return coastEncounter(o.r, o.v, S.soi, S.t + L + dur, tk, horizon);
+  };
+  const base = trial('PRO', 0);
+  const q0 = qOf(base);
+  // How much engine a trim may spend. Ten minutes, or the tank, whichever runs
+  // out first — and the quote shows the ΔV, because what a trim costs is the
+  // lesson. Measured on the return from Mars: the same correction is a few tens
+  // of m/s a month out and 845 m/s fourteen hours out, because by then you are
+  // inside the well and the lever arm is gone. Capping this tighter would hide
+  // that by refusing to answer instead of answering expensively.
+  const flow = curFlow();
+  const dMax = Math.min(flow > 0 ? S.craft.fuel/flow : 0, 600);
+  if (!(dMax > 0)) return { base, q0, goal, sol:null, reason:'no propellant' };
+  let best = null;
+  const consider = (mode, dur, res) => {
+    const q = qOf(res);
+    if (!isFinite(q) || q <= 0) return;
+    const sc = Math.abs(q - goal);
+    if (!best || sc < best.sc) best = { mode, dur, res, q, sc };
+  };
+  for (const mode of ['PRO', 'RET']) {
+    const N = 36, ds = [], qs = [];
+    for (let i = 0; i <= N; i++) {
+      const dur = dMax * i/N;
+      const res = trial(mode, dur);
+      ds.push(dur); qs.push(qOf(res)); consider(mode, dur, res);
+    }
+    for (let i = 0; i < N; i++) {
+      const a = qs[i], c = qs[i+1];
+      if (!isFinite(a) || !isFinite(c)) continue;
+      if ((a - goal) * (c - goal) > 0) continue;
+      let lo = ds[i], hi = ds[i+1], flo = a;
+      for (let n = 0; n < 32; n++) {
+        const mid = (lo + hi)/2, res = trial(mode, mid), qm = qOf(res);
+        consider(mode, mid, res);
+        if (!isFinite(qm)) break;
+        if ((flo - goal) * (qm - goal) <= 0) hi = mid; else { lo = mid; flo = qm; }
+        if (Math.abs(qm - goal) < 1) break;
+      }
+    }
+  }
+  return { base, q0, goal, lead:L, sol:best };
 }
 
 /** Hohmann window to a satellite of the current primary. */
@@ -3355,8 +3613,49 @@ function cmdPlan(A) {
       if (sol && sol.arrival && !sol.arrival.entered)
         say(`No intercept found from this orbit — closest approach ${fmtDist(sol.arrival.miss)}. Circularize, then try again.`, 'warn');
       else
-        say('Falling back to the analytic window. Expect a midcourse trim.', 'warn');
+        say('Falling back to the analytic window. Expect a midcourse trim — PLAN TRIM ' + tk + ' once you are under way.', 'warn');
     }
+    return;
+  }
+
+  if (sub === 'TRIM' || sub === 'MCC') {
+    const tk = A[1];
+    if (!tk || !BODIES[tk]) return say('Usage: PLAN TRIM <BODY> [aim altitude, km]   e.g. PLAN TRIM EARTH', 'err');
+    if (tk !== S.soi && BODIES[tk].parent !== S.soi)
+      return say(`${tk} does not orbit ${b.name}, so there is no approach to trim from here.`, 'err');
+    const aim = parseFloat(A[2]);
+    S.planName = 'MIDCOURSE TRIM · ' + tk;
+    head('MANEUVER · MIDCOURSE TRIM');
+    say('Reading the approach you are on…', 'dim');
+    const t = trimEncounter(tk, isFinite(aim) ? aim : undefined);
+    if (!t) return say('No approach to trim.', 'err');
+    const now = t.base && t.base.entered ? `${fmtDist(t.base.periAlt)} periapsis` : `${fmtDist(t.base ? t.base.miss : Infinity)} miss`;
+    row(tk === S.soi ? 'PERIAPSIS NOW' : 'CLOSEST NOW',
+        now + (t.base && t.base.entered ? ` over ${tk}` : ''), t.q0 > 0 ? '' : 'bad');
+    row('AIM POINT', fmtDist(t.goal) + ` over ${tk}`, 'key');
+    if (!t.sol) {
+      say('');
+      say(`No trim inside a tenth of the tank moves the approach onto ${fmtDist(t.goal)}. `
+        + `The miss is ${fmtDist(Math.abs(t.q0))} and this is a course correction, not a transfer — `
+        + `if the approach is this far out, solve the transfer again with PLAN XFER ${tk}.`, 'warn');
+      return;
+    }
+    const moved = Math.abs(t.sol.q - t.q0);
+    const tdv = t.sol.dur * curThrust() * 1000 / craftMass();
+    row('AFTER TRIM', fmtDist(t.sol.q) + ` over ${tk}`, 'ok');
+    row('MOVES BY', fmtDist(moved), 'ok');
+    row('ΔV REQUIRED', fmtDV(tdv) + '  ' + DIRNAME[t.sol.mode], tdv <= dvRemaining() ? 'key' : 'bad');
+    row('BURN TIME', t.sol.dur.toFixed(2) + ' s at full throttle');
+    row('IGNITION', `T−${fmtT(t.lead)}`);
+    if (tdv > dvRemaining()) say('INSUFFICIENT PROPELLANT for this trim.', 'err');
+    say('');
+    S.solution = { name: 'MIDCOURSE TRIM · ' + tk, dir: t.sol.mode, secs: t.sol.dur, node: 'T',
+                   when: S.t + t.lead, nodeLabel: `T+${t.lead.toFixed(0)} s`,
+                   dv: t.sol.dur * curThrust() * 1000 / craftMass(),
+                   prop: t.sol.dur * curFlow(),
+                   detail: `closest approach ${fmtDist(t.sol.q)} over ${tk}` };
+    say(`  →  BURN ${t.sol.mode} ${t.sol.dur.toFixed(2)} AT T+${t.lead.toFixed(0)}`, 'ok');
+    say('A trim is solved against the trajectory you are on, so it expires: fire it on the clock above or solve it again.', 'dim');
     return;
   }
 
@@ -3419,6 +3718,7 @@ function cmdPlan(A) {
   say('PLAN PERI <km>       raise/lower periapsis (burns at apoapsis)', 'out');
   say('PLAN ESC             escape the current sphere of influence', 'out');
   say('PLAN XFER <BODY>     Hohmann transfer + launch window', 'out');
+  say('PLAN TRIM <BODY>     midcourse trim of the approach you are on', 'out');
   say('PLAN RDV             station rendezvous phasing', 'out');
   say('Each solution returns an executable BURN line.', 'dim');
 }
@@ -3711,7 +4011,14 @@ function rig(o) {
                            cda: 12, qMax: Infinity,
                            thrustSL: null, ispSL: null,
                            stages: null, stageIx: null, stageName: null, payload: 0 }, o);
-  S.craft.fuelMax = o.fuel; S.craft.rcsMax = o.rcs || 0;
+  // Capacity and contents are the same number for every vehicle that launches
+  // with full tanks, which is every vehicle that shipped before this one. A
+  // ship that is meant to be FILLED IN ORBIT is the exception: it lifts off
+  // with what a launcher can lift and the tank it flies home on is bigger than
+  // that. Declaring `fuelMax` says so; leaving it out is the old behaviour,
+  // exactly, which is why nothing before this moved.
+  S.craft.fuelMax = o.fuelMax != null ? o.fuelMax : o.fuel;
+  S.craft.rcsMax = o.rcsMax != null ? o.rcsMax : (o.rcs || 0);
   S.craft.cdaPayload = S.craft.cda;
   // A stacked vehicle. The spacecraft itself is the LAST stage of its own
   // stack — its dry mass, its tanks and its engine — so that dropping the
@@ -3722,7 +4029,8 @@ function rig(o) {
   if (o.stages && o.stages.length) {
     S.craft.payload = 0;
     S.craft.stages = o.stages.map(st => ({ ...st })).concat([{
-      name: o.name, dry: o.dry, fuel: o.fuel || 0, thrust: o.thrust, isp: o.isp,
+      name: o.name, dry: o.dry, fuel: o.fuel || 0, fuelMax: S.craft.fuelMax,
+      thrust: o.thrust, isp: o.isp,
       cda: S.craft.cdaPayload, qMax: Infinity, spacecraft: true }]);
     loadStage(0);
   }
@@ -3957,7 +4265,7 @@ const MISSIONS = [
      instead of OBJECTIVES, which is what makes it ordered and what gives it a
      checkpoint at every boundary — an hour of flying must not be lost to one
      mistake at phase nine.                                                  */
-  id:11, code:'M-10', name:'CARGO RUN',
+  id:11, code:'M-10', name:'CARGO RUN', next:12,
   brief:[
     'Cold and dark at {Cape Auriga} with {1,800 kg} in the hold and a two-stage launcher underneath you. Station {CERES} is at {400 km} and expects the delivery; you bring {1,200 kg} back.',
     'This is a whole flight, not a manoeuvre. Ten phases: wake the vehicle, launch, park, phase up to CERES, dock, swap the load, undock, deorbit, survive the entry, splash down. Each phase is {checkpointed} — RESTART offers the last one back, or the pad if you would rather start over.',
@@ -4027,16 +4335,98 @@ const MISSIONS = [
       check:(s)=> s.status === 'landed' },
   ]
 },
+{
+  /* The longest flight in the game, and the one the refuelling leg exists for.
+     ARES-2 lifts off with 600 kg aboard — all a launcher can carry under a
+     five-tonne Mars ship — and everything past low Earth orbit is flown on
+     propellant that was already in orbit before she was.                    */
+  id:12, code:'M-11', name:'MARS ROUND TRIP',
+  brief:[
+    'Cold and dark at {Cape Auriga} with a {nuclear thermal} stage under the capsule and {600 kg} of hydrogen aboard — {964 m/s}, and not a metre more. That is deliberate. You are not launching a Mars ship; you are launching an empty one.',
+    'Depot {CERES} at {400 km} holds {32,000 kg} and does not refill itself. Dock, tie the bus, and pump. What you take is gone, and what you leave behind is what a later flight will find.',
+    'Then: escape Earth, throw the aphelion out to {1.52 AU}, and fly {259 days} to a Mars flyby. No capture — you pass, you look, and Mars bends your orbit for free.',
+    'Coming home is the hard half. {PLAN XFER EARTH} finds the return, but a transfer solver stops at the edge of a sphere of influence and cannot see the {Moon} sitting inside Earth\'s. Fly {PLAN TRIM EARTH} while you are still months out — the same correction costs a hundredth out there of what it costs on the doorstep.',
+    'An interplanetary arrival is {11 km/s} at the interface and no heat shield aboard survives that, so this flight does not come down. You arrive on a {hyperbola} and you stop: one hard {retrograde burn at periapsis}, enough to close it into an ellipse. Circularising out where you arrive costs more than the tank holds.',
+    'The mission ends {in orbit}. Bringing this crew through the atmosphere is a later flight and a harder problem than it looks — the arc a flyby leaves you on is nothing like the circular one the transfer solver assumes.',
+    'Three crew, {three and a half to four years}. The {regenerative} life support recycles the air and runs on the bus — the oxygen reserve is only there for when the power is not.'],
+  hint:'BATT → PWR UP → LAUNCH → COUNT GO', next:0,
+  sys: [],
+  setup(){ rig({name:'ARES-2', dry:5200, fuel:600, fuelMax:32000,
+                thrust:250, isp:900, rcs:260, rcsIsp:220,
+                crew:3, o2:2000, cda:26, stages: ASCENT_STACK()});
+    setPad('EARTH', 0, { count: 600, program: [[0,90],[2,84],[10,58],[40,22],[130,7]] });
+    S.objects = [ makeStation('EARTH', 400, 25) ];
+    // A depot is a quantity, not a tap. It is sized so the round trip closes
+    // with a real margin and no more — and so that taking it all leaves CERES
+    // empty for whoever comes next.
+    // 32,000 kg, not 26,000. Sized against the WORST return this trajectory
+    // produces, not the luckiest: a flyby that leaves the ship on a fast arc
+    // arrives at e = 5.16 and needs 7.2 km/s to close the hyperbola into a
+    // 20,000 km ellipse. At 26,000 kg the ship arrived with 6.5 and captured
+    // into 46,000 km with a dry tank — a mission that depends on flying the
+    // injection well is a mission that strands people who flew it adequately.
+    S.depot = { name:'CERES', prop: 32000, rate: 12 };
+    S.landingAllowed = true;
+    S.shield.fitted = true; S.shield.band = [MARS_BAND[0], MARS_BAND[1]];
+    S.power.battMax = 4000; S.power.batt = 1400; S.power.area = 90; },
+  phases:[
+    { name:'POWER UP', text:'Bring every system up. The battery is the only power there is until the fairing goes.',
+      hint:'BATT → BUS → AVIO → ATT → GNC, or PWR UP',
+      check:()=> SYSIDS.every(id => !sysFitted(id) || sysOn(id)) },
+    { name:'LIFT OFF', text:'Release the count and fly the pitch program out of the atmosphere.',
+      hint:'COUNT GO → STAGE when the first stage is dry',
+      check:(s,d)=> d.alt > 140 },
+    { name:'PARKING ORBIT', text:'Shut down at 185 km apoapsis, coast up and circularise.',
+      hint:'MECO at 185 km apoapsis → PLAN CIRC AP',
+      check:(s,d)=> d.e.e < 0.02 && d.perAlt > 150 },
+    { name:'RENDEZVOUS', text:'Phase up to CERES at 400 km and close to inside 30 km. Under a kilometre a second in the tank — spend it carefully.',
+      hint:'TGT STATION → PLAN RDV → PLAN CIRC AP',
+      check:()=>{ const t = targetRel(); return !!t && V.len(t.r) < 30; } },
+    { name:'DOCK AND FUEL', text:'Capture, latch, prove the seal, tie the bus and pump CERES dry.',
+      hint:'DOCK AUTO → RETRACT → LATCH → EQUALISE → LEAK → UMB → TIE → LINE → XFER',
+      check:(s)=> s.dock.phase === 'HARD' && s.craft.fuel > s.craft.fuelMax * 0.9 },
+    { name:'TRANS-MARS INJECTION', text:'Undock, escape Earth, then throw aphelion out to Mars\' orbit.',
+      hint:'DOCK UNDOCK → PLAN ESC → PLAN XFER MARS',
+      check:(s,d)=> s.soi === 'SUN' && d.e.ra > BODIES.MARS.a * 0.97 },
+    { name:'MARS FLYBY', text:'Cross into Mars\' sphere of influence and come out the other side. No capture burn — you are not staying.',
+      hint:'WARP 1000000 and wait out the 259 days',
+      check:(s)=> s.flags.marsSOI && s.soi === 'SUN' },
+    { name:'RETURN', text:'Solve the transfer home and fly it. Trim the approach long before you get there.',
+      hint:'PLAN XFER EARTH → then PLAN TRIM EARTH mid-cruise',
+      check:(s)=> s.soi === 'EARTH' },
+    // The last phase, and the mission ends here — in orbit, not in the water.
+    //
+    // Coming down from an interplanetary return is a separate problem and an
+    // honest one: the ship arrives far faster than the shield M-10 carries, and
+    // the trajectory that gets it home is planned by `transferWindow`, which
+    // assumes a circular departure orbit and cannot describe the eccentric arc
+    // a flyby leaves you on. Rather than pretend, the crew stop in Earth orbit
+    // and a later flight brings them down.
+    //
+    // The hint matters. PLAN TRIM is a MIDCOURSE tool — inside Earth's sphere
+    // of influence, on a hyperbola, there is no apoapsis for it or for PLAN
+    // PERI to work at, and circularising at an 8,000 km periapsis costs 3.7
+    // km/s and strands the ship. The move is a retrograde burn AT PERIAPSIS,
+    // sized to leave an ellipse rather than a circle.
+    { name:'EARTH CAPTURE', text:'You are falling past your own planet on a hyperbola. Burn retrograde at periapsis — hard — and let it close into an ellipse. Circularising out there costs more than you have.',
+      hint:'BURN RET <seconds> AT PE, sized to leave an ellipse under 20,000 km',
+      check:(s,d)=> s.soi === 'EARTH' && d.e.e < 1 && d.perAlt > 100 && d.apoAlt < 20000 },
+  ]
+},
 ];
 /* The entry corridor published for AURIGA-10, in kilometres of periapsis.
    Measured on this airframe against the 90 MJ/m² budget and the 420 kW/m² rate
    limit, not carried over from another vehicle: a heavier ship penetrates
    deeper before it decelerates and peaks harder for the same aim point. */
 const CARGO_BAND = [-40, 80];
+/* And the corridor published for ARES-2, measured the same way on the same two
+   limits. It is a different airframe at a different mass and the number is not
+   assumed to carry over — that is the rule item 04 set, applied again. */
+const MARS_BAND = [-40, 80];
 /* The roster reads as a ladder, and launch comes before insertion. Ids are not
    renumbered to say so — they are saved in the flight record and every suite
    calls them by number — so the order is stated here instead. */
-const ROSTER_ORDER = [10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 0];
+const ROSTER_ORDER = [10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 0];
 const rosterList = () => ROSTER_ORDER.map(id => MISSIONS.find(m => m.id === id)).filter(Boolean);
 
 function loadMission(id) {
@@ -4050,10 +4440,10 @@ function loadMission(id) {
   S.aligning = false; S.warnedProx = false;
   S.completed = false; S.pauseAfterBurn = false;
   S.solution = null; S.burnSel = { dir:'PRO', at:'AP', dur:0 };
-  S.landingAllowed = false; S.thermLimit = 800;
+  S.landingAllowed = false; S.thermLimit = 800; S.depot = null;
   S.therm.hull = 20; S.ledger = { dvUsed:0, burns:0 };
   S.loads = { HEAT:true, SCI:false, COMM:true };
-  S.flags = { lunarSOI:false, perihelionPassed:false };
+  S.flags = { lunarSOI:false, perihelionPassed:false, marsSOI:false, earthDeparted:false };
   S.warnedPower = S.warnedTherm = S.warnedAtmo = S.warnedBus = S.warnedQ = false;
   S.warnedEntryWarp = false;
   S.o2Warn = 0;
@@ -4175,6 +4565,8 @@ function checkPhases() {
 function checkObjectives() {
   if (S.status === 'lost' || S.completed) return;
   if (S.soi === 'MOON') S.flags.lunarSOI = true;
+  if (S.soi === 'MARS') S.flags.marsSOI = true;
+  if (S.soi === 'SUN') S.flags.earthDeparted = true;
   if (S.soi === 'SUN' && D.e && D.e.r < D.e.rp*1.02 && D.e.e > 0.05) S.flags.perihelionPassed = true;
   if (S.phases) return checkPhases();
   if (!S.objectives.length) return;
@@ -4625,8 +5017,12 @@ PLAN: Object.assign(one('MANEUVER'), { sub: () => 'SOLVER', build: () => [
         if (!v) return say('ENTER A BODY NAME IN THE SCRATCHPAD FIRST', 'warn');
         cmdPlan(['XFER', v]); })) },
   { l: S.objects.some(o => o.id === 'STATION') ? F('', '<RENDEZVOUS', 'sel', planThen(() => cmdPlan(['RDV']))) : F('', '', 'dim'),
-    r: S.solution ? F('Last solution', 'REVIEW>', 'sel', 'PLANR') : F('Last solution', 'NONE', 'dim') },
-  { l: F('ΔV remaining', dv(), 'ok'), r: F('Reference', soiBody().name) },
+    r: F('body into scratchpad', 'MIDCOURSE TRIM>', 'sel', planThen(() => {
+        const v = eatScratch().toUpperCase();
+        if (!v) return say('ENTER A BODY NAME IN THE SCRATCHPAD FIRST', 'warn');
+        cmdPlan(['TRIM', v]); })) },
+  { l: F('ΔV remaining', dv(), 'ok'),
+    r: S.solution ? F('Last solution', 'REVIEW>', 'sel', 'PLANR') : F('Reference', soiBody().name) },
   menuRow('BURN>', 'BURN'),
 ] }),
 
@@ -4900,15 +5296,20 @@ UTIL: { count: () => S.manifest ? 5 : 4, title: () => 'UTILITIES',
       { l: F('Transfer line', pr.line ? 'CONNECTED' : 'DISCONNECTED', pr.line ? 'ok' : 'dim'),
         r: F('Line purge', pr.purged ? 'COMPLETE' : pr.line ? gauge(pr.purge/30) + ' ' + (pr.purge/30*100).toFixed(0) + '%' : 'NOT STARTED',
              pr.purged ? 'ok' : pr.line ? 'go' : 'dim') },
-      { l: F('Flow', pr.xfer ? '0.500 kg/s' : '0.000 kg/s', pr.xfer ? 'ok' : 'dim'),
+      { l: F('Flow', (pr.xfer ? (S.depot && S.depot.rate ? S.depot.rate : 0.5) : 0).toFixed(3) + ' kg/s', pr.xfer ? 'ok' : 'dim'),
         r: F('Transferred', pr.moved.toFixed(1) + ' kg', pr.done ? 'ok' : '') },
       { l: F('Main tank', gauge(fpct/100) + ' ' + fpct.toFixed(0) + '%', fpct > 95 ? 'ok' : ''),
-        r: F('RCS', S.craft.rcs.toFixed(1) + ' / ' + S.craft.rcsMax.toFixed(0) + ' kg') },
+        r: S.depot
+             ? F('Depot remaining', S.depot.prop.toFixed(0) + ' kg',
+                 S.depot.prop <= 0 ? 'bad' : S.depot.prop < S.craft.fuelMax * 0.1 ? 'go' : 'ok')
+             : F('RCS', S.craft.rcs.toFixed(1) + ' / ' + S.craft.rcsMax.toFixed(0) + ' kg') },
       { l: K(pr.line ? '<DISCONNECT LINE*' : '<CONNECT LINE*', 'go', 'LINE'),
         r: K(pr.xfer ? 'STOP TRANSFER*' : 'START TRANSFER*', pr.purged && dk.pwr.tie ? 'go' : 'dim', 'XFER') },
       { full: F('Procedure', pr.purged && !dk.pwr.tie
           ? 'The transfer pumps run off the station bus — close the bus tie on the ELECTRICAL page before starting the flow.'
-          : 'Connect the coupling, let the thirty-second purge finish, then start the flow. It fills the main tank first, then RCS, and stops itself when both are full.', 'body'), wrap: true },
+          : S.depot
+            ? `Connect the coupling, let the thirty-second purge finish, then start the flow. It fills the main tank first, then RCS. ${(S.depot.name || 'The depot')} holds ${S.depot.prop.toFixed(0)} kg and it does not refill itself — what you take is gone.`
+            : 'Connect the coupling, let the thirty-second purge finish, then start the flow. It fills the main tank first, then RCS, and stops itself when both are full.', 'body'), wrap: true },
       foot,
     ];
   } },
@@ -5119,23 +5520,26 @@ LIFE: Object.assign(one('LIFE SUPPORT'), { sub: () => S.craft.crew ? S.craft.cre
   // Oxygen is lethal now, so the endurance is the headline number and the rate
   // that produces it is right underneath, with life support off multiplying it.
   const fan = S.dock.air.fan, live = sysOn('ECLSS');
-  const rate = fan ? 0 : S.craft.crew * (live ? 1 : 4);      // crew-hours per hour
+  const rate = S.craft.crew * o2Rate();                      // crew-hours of reserve per hour
   const hrs = rate > 0 ? S.craft.o2 / rate : Infinity;
   return [
-    { l: F('O₂ endurance', fan ? 'STATION SUPPLY' : fmtT(hrs*3600), hrs < 4 ? 'bad' : hrs < 24 ? 'go' : 'ok'),
-      r: F('Consumption', rate.toFixed(0) + ' crew-h / h', live || fan ? 'ok' : 'bad') },
+    { l: F('O₂ loop', fan ? 'STATION SUPPLY' : live ? 'CLOSED' : 'OPEN — ON RESERVE',
+           live || fan ? 'ok' : 'bad'),
+      r: F('Reserve draw', rate.toFixed(0) + ' crew-h / h', live || fan ? 'ok' : 'bad') },
+    { l: F('Reserve endurance', rate > 0 ? fmtT(hrs*3600) : 'NOT BEING USED',
+           rate === 0 ? 'ok' : hrs < 4 ? 'bad' : hrs < 24 ? 'go' : ''),
+      r: F('Reserve left', S.craft.o2.toFixed(0) + ' crew-h') },
     { l: F('Life support', live ? 'RUNNING' : sysState('ECLSS') === 'START' ? 'STARTING' : 'OFF',
            live ? 'ok' : 'bad'),
-      r: F('Crew-hours left', S.craft.o2.toFixed(0)) },
-    { l: F('Cabin pressure', live || fan ? '101.3 kPa' : 'SUIT LOOP', live || fan ? 'ok' : 'go'),
-      r: F('Cabin temperature', live || fan ? '21.1 °C' : '—') },
-    { l: F('CO₂ scrubber', live ? 'NOMINAL' : fan ? 'STATION' : 'OFFLINE', live || fan ? 'ok' : 'bad'),
+      r: F('Cabin pressure', live || fan ? '101.3 kPa' : 'SUIT LOOP', live || fan ? 'ok' : 'go') },
+    { l: F('CO₂ scrubber', live ? 'REGENERATIVE' : fan ? 'STATION' : 'OFFLINE', live || fan ? 'ok' : 'bad'),
       r: F('Crew', String(S.craft.crew)) },
     { full: F('', fan
         ? 'The station is supplying and scrubbing the air through the hatch. Nothing of yours is being used.'
         : live
-          ? 'Life support is running and the crew are using one crew-hour per hour each. Reaching zero is fatal — you are told a day out and again four hours out.'
-          : 'LIFE SUPPORT IS OFF. The crew are on emergency oxygen at four times the normal rate. Bring ECLSS up on the systems page.', live || fan ? 'body' : 'go'), wrap: true },
+          ? 'The loop is closed: CO₂ is reduced back to water and the water is electrolysed, so the oxygen comes round again and the tank is not touched. It runs on the bus. Lose the bus and the tank is all there is.'
+          : `LIFE SUPPORT IS OFF — nothing is scrubbing the air, so the crew are flushing the cabin and burning the reserve at ${ECLSS_OPEN_RATE}× what they breathe. Bring ECLSS up on the systems page.`,
+        live || fan ? 'body' : 'go'), wrap: true },
     { l: NAV('<SYSTEMS', 'SYS'),
       r: S.dock.phase === 'HARD' ? NAV('UTILITIES>', 'UTIL') : NAV('POWER>', 'PWR') },
   ]; } }),
