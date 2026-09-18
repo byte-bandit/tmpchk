@@ -9,7 +9,7 @@ constraints and open questions.
 | [01](01-docking.md) | Realistic docking — attitude and mechanics both **done** | Done | — |
 | [02](02-cold-start.md) | Cold start and systems configuration | **Done** | — |
 | [03](03-launch.md) | Launch from Earth | **Done** | — |
-| [04](04-cargo-and-return.md) | Cargo run: launch, deliver, come home | Not started | 01, 02, 03 |
+| [04](04-cargo-and-return.md) | Cargo run: launch, deliver, come home | **Done** | 01, 02, 03 |
 | [05](05-mars-round-trip.md) | Mars round trip: refuel, go, get home | Not started | 04 |
 | [06](06-lunar-landing.md) | Lunar landing from a mothership | Not started | 04 |
 
@@ -65,7 +65,7 @@ first two, and FREE FLIGHT now flies all of it.
 | script 8 | CDU page framework, `PAGES`, input, fullscreen, main loop, boot |
 
 Tests boot the real page under a DOM stub (`tests/harness.js`) or drive it in
-Chromium (`tests/browser/`). Ten suites; `./tests/run.sh` runs the lot.
+Chromium (`tests/browser/`). Twelve suites; `./tests/run.sh` runs the lot.
 
 ## Constraints that apply to every item
 

@@ -367,7 +367,7 @@ const AU = 149597870.7;        // km
 const BODIES = {
   SUN:   { name:'SUN',   mu:1.32712440018e11, R:696340, parent:null,   color:'#F2A33C', soi:Infinity },
   EARTH: { name:'EARTH', mu:398600.4418, R:6371,   parent:'SUN',   a:AU,          period:3.15581e7, phase0:1.10, soi:924000,  color:'#3FA9C9', atmo:140,
-           rho0:1.225, hScale:8.5,  rot:7.2921159e-5 },
+           rho0:1.225, hScale:8.5,  rot:7.2921159e-5, ocean:true },
   MOON:  { name:'MOON',  mu:4902.800,    R:1737.4, parent:'EARTH', a:384400,      period:2.360591e6, phase0:0.40, soi:66100,  color:'#8A93A3', rot:2.6617e-6 },
   VENUS: { name:'VENUS', mu:324858.6,    R:6051.8, parent:'SUN',   a:0.72333*AU,  period:1.94141e7, phase0:4.10, soi:616000,  color:'#D8B26A', atmo:250,
            rho0:65.0,  hScale:15.9, rot:-2.9924e-7 },
@@ -554,6 +554,9 @@ const vAtR  = (mu,r,a) => Math.sqrt(Math.max(0, mu*(2/r - 1/a)));
 /* ============================================================
    VEHICLE STATE + SUBSYSTEMS
    ============================================================ */
+const SHIELD_LOAD = 90e6;      // J/m² the ablator can absorb before it is gone
+const SHIELD_RATE = 420e3;     // W/m² it cannot take for an instant
+
 const S = {
   t: 0, soi: 'EARTH', r:{x:0,y:0}, v:{x:0,y:0},
   warp: 1, paused: true,
@@ -561,7 +564,7 @@ const S = {
   target: null, objects: [],
   mission: null, objectives: [], status: 'idle',
   craft: { name:'—', dry:2200, fuel:0, fuelMax:0, thrust:0, isp:311,
-           rcs:0, rcsMax:0, rcsIsp:220, crew:0 },
+           rcs:0, rcsMax:0, rcsIsp:220, crew:0, cargo:0, cargoMax:0 },
   power: { batt:100, battMax:100, area:14, eff:0.29, load:340, gen:0, tie:0, ecl:false },
   therm: { hull:20 },
   loads: { HEAT:true, SCI:false, COMM:true },
@@ -581,7 +584,62 @@ const S = {
   // starts at 1 so a mission that never touches it burns exactly as it always
   // did. `pad` is null except on a vehicle that has not lifted off yet.
   throttle: 1, pad: null, fairing: false,
+  // Coming home. A vehicle with no shield fitted and both chutes stowed adds
+  // exactly nothing to the drag area and takes exactly the heating it always
+  // took, so every mission that never comes down is untouched by all of it.
+  shield: freshShield(), chute: freshChutes(),
+  // What is being carried where. Null on a mission with no manifest.
+  manifest: null,
+  // Ordered missions only. `phases` is null on the flat, unordered kind, which
+  // is every mission that shipped before this.
+  phases: null, phase: 0, checkpoints: [],
 };
+
+/* ---- coming home -------------------------------------------------------
+   Two numbers make an entry corridor, and neither of them is hull temperature.
+   Measured across the whole flyable band of deorbit burns, the hull reading
+   moves 1256 → 1307 °C and then FALLS for steeper entries — it says almost
+   nothing about how hard the entry was, and it belongs to M-09 anyway, which
+   uses it for a bus limit at 180 °C.
+
+   What does discriminate, measured from the 400 km station orbit:
+     - TOTAL HEAT LOAD, 143.7 MJ/m² aiming at 138 km down to 25.4 at −1500 km.
+       Shallow is worse: you skim, exit, come round and pay again every lap.
+     - PEAK HEATING RATE, 310 kW/m² shallow up to 561 steep. Steep is worse.
+   So the shield carries a budget it spends and a rate it cannot survive, and
+   between them sits a corridor about 73 m/s of deorbit ΔV wide.             */
+function freshShield() {
+  return { fitted:false, load:0, cap:SHIELD_LOAD, rateLimit:SHIELD_RATE,
+           rate:0, peak:0, gone:false, warned:0 };
+}
+
+/* Chutes are drag area and nothing more exotic: they multiply `cda`, which
+   already routes through the RK4 integrator because `inAtmosphere()` sends it
+   there. The envelope is the interesting part, and it is measured.
+
+   Dynamic pressure is pinned near 1.9 kPa from 30 km to the sea — the vehicle
+   is subsonic and sitting on its terminal velocity — so a q gate DOWN THERE
+   can never be broken and would be dead code. Altitude arms the chute; q is
+   only ever the tear-away. The mains' 0.80 kPa ceiling is the one that makes
+   the drogue compulsory: without it the vehicle is still at 1.86 kPa passing
+   6 km and the canopy comes straight off. */
+const CHUTES = {
+  DROGUE: { label:'DROGUE', arm: 25, area: 110,  qTear: 3000, infl: 4 },
+  MAIN:   { label:'MAINS',  arm: 6,  area: 1100, qTear: 800,  infl: 8 },
+};
+function freshChutes() {
+  return { DROGUE: { state:'STOWED', t:0 }, MAIN: { state:'STOWED', t:0 } };
+}
+/** Drag area the canopies are adding right now, m². Zero unless one is out. */
+function chuteArea() {
+  let a = 0;
+  for (const id in CHUTES) {
+    const c = S.chute[id];
+    if (!c || c.state !== 'OUT') continue;
+    a += CHUTES[id].area * Math.min(1, c.t / CHUTES[id].infl);   // inflating takes time
+  }
+  return a;
+}
 
 /* ---- docking state ----------------------------------------------------
    `phase` walks FREE → SOFT → RETRACT → RETRACTED → LATCHING → HARD, and the
@@ -598,6 +656,10 @@ function freshDock() {
     pwr:  { umb:false, tie:false },
     air:  { duct:false, fan:false },
     prop: { line:false, purge:0, purged:false, xfer:false, moved:0, done:false },
+    // Cargo goes through the hatchway, hand over hand, so it needs the same
+    // open hatch the air duct does. `moving` is OUT (delivering) or IN
+    // (taking the return load on) or null.
+    cargo: { moving:null, out:0, in:0, done:false },
   };
 }
 
@@ -791,7 +853,12 @@ function alignLeft() {
   return Math.max(0, ALIGN_TIME - s.t);
 }
 
-const craftMass = () => S.craft.dry + S.craft.fuel + S.craft.rcs;
+/* Cargo is mass like any other mass. It rides in `craftMass` beside the
+   propellant, so every formula that already weighed the vehicle — the solver,
+   the ΔV remaining, the thrust-to-weight, the ascent — feels it without being
+   told about it. It defaults to 0 and `x + 0 === x` exactly, which is why a
+   vehicle carrying none flies bit-for-bit as it did before this existed. */
+const craftMass = () => S.craft.dry + S.craft.fuel + S.craft.rcs + (S.craft.cargo || 0);
 const soiBody = () => BODIES[S.soi];
 
 /* ---- throttle, ambient pressure and the engine it feeds -----------------
@@ -893,7 +960,9 @@ function dragAcc(rv, vv, mass) {
   const b = soiBody();
   const rho = airDensity(b, V.len(rv) - b.R);
   if (rho <= 0) return ZEROV;
-  const cda = S.craft.cda || 0;
+  // The canopies are part of the drag area while they are out and add exactly
+  // zero while they are stowed, which is every vehicle that shipped before.
+  const cda = (S.craft.cda || 0) + chuteArea();
   if (cda <= 0) return ZEROV;
   const rel = airRelative(rv, vv, b);
   const vm = V.len(rel);
@@ -1020,14 +1089,67 @@ function stepSystems(dt) {
   // asymmetry between going up and coming down — on the way up the vehicle is
   // shielded and the air is behind it in four minutes; on the way down it is
   // bare, and this is what kills it.
+  const sh = S.shield;
   if (D.q > 0 && D.rho > 0 && !S.fairing) {
     const vms = D.vAir * 1000;
     const qdot = 1.7415e-4 * Math.sqrt(D.rho / HEAT_NOSE) * vms * vms * vms;    // W/m²
-    const aero = Math.pow(qdot / (0.85 * 5.670374e-8), 0.25) - 273.15;
-    if (aero > eq) { eq = aero; tau = 45; }
-  }
+    // The shield spends itself absorbing this. `checkHazards` is what judges
+    // the two limits; this is only the accounting, so a lost flight and a
+    // survived one are decided in exactly one place.
+    if (sh.fitted) {
+      sh.rate = qdot;
+      if (qdot > sh.peak) sh.peak = qdot;
+      if (!sh.gone) sh.load += qdot * dt;
+    }
+    // An intact shield is what the hull is hiding behind. Once it is gone the
+    // vehicle is bare and the arithmetic below is the arithmetic that has
+    // always been here — which is how burning through kills you.
+    if (!(sh.fitted && !sh.gone)) {
+      const aero = Math.pow(qdot / (0.85 * 5.670374e-8), 0.25) - 273.15;
+      if (aero > eq) { eq = aero; tau = 45; }
+    }
+  } else if (sh.fitted) sh.rate = 0;
   const k = 1 - Math.exp(-dt / tau);
   S.therm.hull += (eq - S.therm.hull) * k;
+  stepChutes(dt);
+}
+
+/* ---- the canopies -------------------------------------------------------
+   A chute takes seconds to inflate and pulls harder the further it opens, so
+   `chuteArea` ramps it in. Two things can go wrong and both are real: too much
+   dynamic pressure tears it off the risers, and too little altitude leaves it
+   still inflating when the water arrives.                                   */
+function stepChutes(dt) {
+  for (const id in CHUTES) {
+    const c = S.chute[id], def = CHUTES[id];
+    if (!c || c.state !== 'OUT') continue;
+    c.t += dt;
+    if (D.q > def.qTear) {
+      c.state = 'TORN';
+      say(`${def.label} TORN AWAY · ${(D.q/1000).toFixed(2)} kPa against a ${(def.qTear/1000).toFixed(2)} kPa limit. `
+        + (id === 'MAIN' ? 'The mains will not take the airstream this high — the drogue is what slows you enough to stream them.'
+                         : 'Too fast, too early. That canopy is gone.'), 'err');
+    }
+  }
+}
+/** Stream a canopy, or say exactly why not. Returns null when it deployed. */
+function deployChute(id) {
+  const def = CHUTES[id], c = S.chute[id];
+  if (!def) return 'No such canopy.';
+  if (c.state === 'OUT') return `${def.label} already streamed.`;
+  if (c.state === 'TORN') return `${def.label} were torn away — there is nothing left to stream.`;
+  const b = soiBody();
+  if (!b.rho0) return `No air to inflate a canopy in — ${b.name} has no atmosphere.`;
+  // The canopies ride up under the fairing, which is also why a vehicle
+  // standing on the pad — at zero altitude, well inside every arming gate —
+  // cannot stream one.
+  if (S.fairing) return `${def.label} are stowed behind the fairing.`;
+  const alt = V.len(S.r) - b.R;
+  if (alt > def.arm) return `${def.label} ARMED BELOW ${def.arm} km — you are at ${alt.toFixed(1)} km.`;
+  c.state = 'OUT'; c.t = 0;
+  say(`${def.label} STREAMED at ${alt.toFixed(1)} km, ${(D.q/1000).toFixed(2)} kPa. `
+    + `Full ${def.area} m² in ${def.infl} s; they come off above ${(def.qTear/1000).toFixed(2)} kPa.`, 'key');
+  return null;
 }
 
 /* ---- thrust ------------------------------------------------ */
@@ -1377,7 +1499,58 @@ function stepDock(dt) {
       if (q > 0) { pr.xfer = false; pr.done = true; say(`TRANSFER COMPLETE · ${pr.moved.toFixed(1)} kg aboard, tanks full.`, 'ok'); }
     }
   }
+  stepCargo(dt);
   if (utilitiesDone()) checkObjectives();
+}
+
+/* ---- cargo across the hatch --------------------------------------------
+   The same shape as the propellant transfer that is already here: one
+   precondition, one rate, one number to watch, one way to stop. The
+   difference is that this one moves the vehicle's MASS, so the ΔV remaining
+   on the FUEL page falls while you unload and the next burn costs
+   differently. That is the whole point of it.                             */
+const CARGO_RATE = 4;          // kg/s through the hatchway
+function stepCargo(dt) {
+  const ck = S.dock.cargo, mf = S.manifest;
+  if (!ck.moving) return;
+  if (!S.dock.vest.hatch) {
+    ck.moving = null;
+    return say('CARGO TRANSFER STOPPED — the hatch closed.', 'warn');
+  }
+  let q = CARGO_RATE * dt;
+  if (ck.moving === 'OUT') {
+    const left = Math.max(0, (mf ? mf.deliver : S.craft.cargo) - ck.out);
+    const take = Math.min(q, left, S.craft.cargo);
+    S.craft.cargo -= take; ck.out += take;
+    if (take < q - 1e-9) {
+      ck.moving = null;
+      say(`DELIVERY COMPLETE · ${ck.out.toFixed(0)} kg off the vehicle. `
+        + `${craftMass().toFixed(0)} kg all up now, ${fmtDV(dvRemaining())} in the tanks.`, 'ok');
+      cargoCheckDone();
+    }
+  } else {
+    const left = Math.max(0, (mf ? mf.collect : 0) - ck.in);
+    const room = Math.max(0, (S.craft.cargoMax || 0) - S.craft.cargo);
+    const take = Math.min(q, left, room);
+    S.craft.cargo += take; ck.in += take;
+    if (take < q - 1e-9) {
+      ck.moving = null;
+      if (room <= 1e-9 && left > 1e-9)
+        say(`HOLD FULL · ${ck.in.toFixed(0)} kg aboard and no room for the rest.`, 'warn');
+      else say(`RETURN LOAD ABOARD · ${ck.in.toFixed(0)} kg. `
+        + `${craftMass().toFixed(0)} kg all up, ${fmtDV(dvRemaining())} left. Every burn home costs more now.`, 'ok');
+      cargoCheckDone();
+    }
+  }
+}
+function cargoCheckDone() {
+  const ck = S.dock.cargo, mf = S.manifest;
+  if (!mf) return;
+  if (ck.out >= mf.deliver - 1e-6 && ck.in >= mf.collect - 1e-6) {
+    ck.done = true;
+    say('MANIFEST COMPLETE · delivery off, return load aboard.', 'ok');
+  }
+  checkObjectives();
 }
 
 /* ---- approach guidance --------------------------------------------------
@@ -1786,6 +1959,20 @@ function advance(dtSim) {
     S.warp = 10;
     if (!S.warnedProx) { S.warnedProx = true; say('Warp limited to 10× inside 500 m — this is flown in something close to real time.', 'warn'); }
   } else if (!inProxOps()) S.warnedProx = false;
+  // An entry is the same problem as a docking and needs the same answer. The
+  // trajectory itself is warp-proof — the chunk is already pinned at half a
+  // second inside the air, and flying the same entry at 1× and at 1,000,000×
+  // moves the arrival by 196 m — but the WALL CLOCK is not. Measured, at
+  // 1,000× an entry from the interface to the sea is eight frames and 0.13 s,
+  // and the CDU refreshes once a second, so the player sees no page at all
+  // between the deorbit burn and the water. Ten times over is six minutes.
+  const entering = inAtmosphere() && !(S.pad && !S.pad.lifted);
+  if (entering && S.warp > 10) {
+    S.warp = 10;
+    if (!S.warnedEntryWarp) { S.warnedEntryWarp = true;
+      say('Warp limited to 10× inside the atmosphere — an entry is flown, not skipped. '
+        + 'The canopies have a few tens of seconds of envelope and you have to be there for them.', 'warn'); }
+  } else if (!entering) S.warnedEntryWarp = false;
   let left = dtSim, guard = 0;
   while (left > 1e-9 && guard++ < 220) {
     let dt;
@@ -1936,6 +2123,29 @@ function checkHazards() {
   if (S.therm.hull > tl*0.8 && !S.warnedTherm) { S.warnedTherm = true; say(`CAUTION · HULL ${S.therm.hull.toFixed(0)} °C — limit is ${tl} °C`, 'warn'); }
   if (S.therm.hull > tl) return loseMission(`VEHICLE LOST — thermal failure. Hull exceeded ${tl} °C.`);
 
+  // The heat shield. Two limits, and they are the two sides of the corridor:
+  // come in too steep and the rate takes the ablator off in one piece; come in
+  // too shallow and you spend the budget a lap at a time until there is none.
+  const sh = S.shield;
+  if (sh.fitted && !sh.gone) {
+    if (sh.rate > sh.rateLimit)
+      return loseMission(`VEHICLE LOST — heat shield failed at ${(sh.rate/1000).toFixed(0)} kW/m², `
+        + `${(sh.rate/sh.rateLimit).toFixed(2)}× the ${(sh.rateLimit/1000).toFixed(0)} kW/m² it is rated for. `
+        + `That entry was too steep. Aim the periapsis higher and the peak comes down.`);
+    if (sh.load >= sh.cap) {
+      sh.gone = true;
+      say(`HEAT SHIELD BURNED THROUGH · ${(sh.load/1e6).toFixed(1)} MJ/m² absorbed of ${(sh.cap/1e6).toFixed(0)}. `
+        + `There is nothing between the hull and the air now.`, 'err');
+    } else {
+      const f = sh.load / sh.cap;
+      if (f > 0.85 && sh.warned < 2) { sh.warned = 2;
+        say(`WARNING · HEAT SHIELD ${(f*100).toFixed(0)}% SPENT — ${((sh.cap-sh.load)/1e6).toFixed(1)} MJ/m² left. `
+          + `Another skimming pass will not fit inside it.`, 'err'); }
+      else if (f > 0.6 && sh.warned < 1) { sh.warned = 1;
+        say(`CAUTION · HEAT SHIELD ${(f*100).toFixed(0)}% SPENT. Every pass through the air costs more of it.`, 'warn'); }
+    }
+  }
+
   // Dynamic pressure. A stage is built for a design q and will fly through it
   // all day; there is a margin above it, and past that the vehicle comes apart.
   // Throttling back is what the margin is for.
@@ -1958,15 +2168,33 @@ function checkHazards() {
   if (S.pad && !S.pad.cleared) return false;
 
   if (alt <= 0) {
-    const vv = Math.abs(V.dot(S.v, V.unit(S.r))) * 1000;      // m/s vertical
-    const hv = Math.abs(V.crs(V.unit(S.r), S.v)) * 1000;      // m/s horizontal
-    if (S.landingAllowed && vv < 4 && hv < 3) {
+    // WHICH FRAME. A vehicle hanging under a parachute is moving with the air,
+    // and the air turns with the planet: over Earth that reads 464.58 m/s of
+    // lateral drift in the inertial frame against a 3 m/s gate, so no
+    // splashdown could ever be judged a landing. Where there is air, the
+    // ground is what you arrive on and the ground is what you measure against.
+    //
+    // Where there is NO air, nothing changes — and that is deliberate. The
+    // Moon's surface moves at 4.62 m/s, so a ground-relative gate would make
+    // M-06's landing, which arrives at 0.00 m/s inertial, unflyable. An
+    // airless body keeps the inertial check it has always had, bit for bit.
+    const vRef = b.rho0 ? airRelative(S.r, S.v, b) : S.v;
+    const vv = Math.abs(V.dot(vRef, V.unit(S.r))) * 1000;      // m/s vertical
+    const hv = Math.abs(V.crs(V.unit(S.r), vRef)) * 1000;      // m/s horizontal
+    // Water is soft. A capsule that splashes down is taking the arrival on an
+    // ocean rather than on rock, which is why a real one comes in at nine
+    // metres a second under a canopy no larger than it has to be.
+    const sea = !!b.ocean;
+    const vLim = sea ? 10 : 4, hLim = sea ? 8 : 3;
+    if (S.landingAllowed && vv < vLim && hv < hLim) {
       S.status = 'landed'; S.v = {x:0,y:0};
       S.r = V.mul(V.unit(S.r), b.R);
-      say(`TOUCHDOWN on ${b.name} · ${vv.toFixed(2)} m/s vertical, ${hv.toFixed(2)} m/s lateral`, 'ok');
+      say(`${sea ? 'SPLASHDOWN' : 'TOUCHDOWN'} on ${b.name} · ${vv.toFixed(2)} m/s vertical, ${hv.toFixed(2)} m/s lateral`
+        + (sea ? ` — limits ${vLim} / ${hLim}. Recovery is on its way.` : ''), 'ok');
       checkObjectives(true); return true;
     }
-    return loseMission(`VEHICLE LOST — surface impact on ${b.name} at ${Math.hypot(vv,hv).toFixed(0)} m/s.`);
+    return loseMission(`VEHICLE LOST — ${sea ? 'impact with the sea' : 'surface impact'} on ${b.name} `
+      + `at ${Math.hypot(vv,hv).toFixed(0)} m/s${sea ? ` against a ${vLim} m/s limit` : ''}.`);
   }
   // The interface is no longer only a caution: below it the air is real, it
   // takes energy out of the orbit every second, and it does not give it back.
@@ -2379,7 +2607,12 @@ function updateHUD() {
   // Below 60 km on a landing, apoapsis and its countdown stop meaning anything;
   // descent rate and lateral drift are what decide whether you survive.
   const descent = S.landingAllowed && d.alt < 60 && S.status === 'flight';
-  const vspd = -d.e.vr, hspd = Math.abs(V.crs(V.unit(S.r), S.v));
+  // Same frame the touchdown gate judges in. Reporting these inertially while
+  // the gate reads ground-relative put 464.6 m/s of lateral drift on the
+  // descent readout, in red, for a capsule hanging dead still under its
+  // canopies — the one instrument the player is watching all the way down.
+  const vRefH = d.b.rho0 ? airRelative(S.r, S.v, d.b) : S.v;
+  const vspd = -V.dot(vRefH, V.unit(S.r)), hspd = Math.abs(V.crs(V.unit(S.r), vRefH));
   set('k-apo',  descent ? 'V-Speed' : 'Apo');
   set('d-apo',  descent ? fmtVel(vspd) : (d.escape ? 'ESCAPE' : fmtDist(d.apoAlt)));
   set('k-tapo', descent ? 'Lateral' : 'T−Apo');
@@ -2647,6 +2880,15 @@ function exec(raw) {
   }
   case 'DOCK': case 'PROX': return cmdDock(A);
   case 'UTIL': case 'UTILITIES': return gotoPage('UTIL');
+  case 'ENTRY': case 'EDL': case 'REENTRY': return gotoPage('ENTR');
+  case 'CHUTE': case 'CHUTES': {
+    const a = (A && A[0]) || '';
+    if (a === 'DROGUE' || a === 'D') { const m = deployChute('DROGUE'); return m ? say(m, 'err') : undefined; }
+    if (a === 'MAIN' || a === 'MAINS' || a === 'M') { const m = deployChute('MAIN'); return m ? say(m, 'err') : undefined; }
+    return gotoPage('ENTR', 1);
+  }
+  case 'DROGUE': { const m = deployChute('DROGUE'); return m ? say(m, 'err') : undefined; }
+  case 'MAINS': { const m = deployChute('MAIN'); return m ? say(m, 'err') : undefined; }
   case 'TRANS': case 'RCS': return cmdTrans(A);
 
   case 'PWR': case 'POWER': case 'EPS': return cmdPwr(A);
@@ -2660,7 +2902,23 @@ function exec(raw) {
   case 'LOG': case 'OBJ': return gotoPage('MSN');
   case 'RESTART': case 'RESET': {
     if (!S.mission) return say('NO MISSION LOADED', 'err');
-    return loadMission(S.mission.id);
+    const what = (A && A[0]) || '';
+    if (what === 'PAD' || what === 'START' || what === 'TOP') return loadMission(S.mission.id);
+    if (what === 'PHASE' || what === 'CHECKPOINT' || what === 'CP') {
+      const m = restoreCheckpoint();
+      return m ? say(m, 'err') : undefined;
+    }
+    // On a flat mission RESTART means what it has always meant. On an ordered
+    // one there are two honest answers and picking one silently would throw
+    // away either an hour of flying or the fresh start the player asked for.
+    if (!S.phases || !lastCheckpoint()) return loadMission(S.mission.id);
+    const cp = lastCheckpoint();
+    head('RESTART · ' + S.mission.code);
+    row('LAST CHECKPOINT', `${cp.name} at ${fmtMET(cp.t)}`, 'ok');
+    row('RESUME IT', 'RESTART PHASE', 'key');
+    row('START OVER', 'RESTART PAD', 'key');
+    say('Both are on the MISSION page as keys.', 'sys');
+    return;
   }
   case 'FULL': case 'FS': { toggleFullscreen(); return; }
   case 'CLS': case 'CLEAR': { MSGS.length = 0; clearMessage(); return; }
@@ -3376,7 +3634,35 @@ function cmdDock(A) {
     return say('TRANSFER RUNNING · 0.5 kg/s into the main tank, then RCS.', 'ok');
   }
 
-  default: return no('Usage: DOCK AUTO|RETRACT|LATCH|RESEAT|UNDOCK · EQUALISE|LEAK|HATCH · UMB|TIE · DUCT|FAN · LINE|XFER');
+  /* --- cargo --- */
+  case 'UNLOAD': case 'DELIVER': {
+    const ck = dk.cargo, mf = S.manifest;
+    if (dk.phase !== 'HARD') return no('Hard dock required.');
+    if (!dk.vest.hatch) return no('The cargo goes through the hatch — open it first.');
+    if (ck.moving === 'OUT') { ck.moving = null; return say(`DELIVERY STOPPED · ${ck.out.toFixed(0)} kg off so far.`, 'key'); }
+    if (ck.moving === 'IN') return no('Stop taking the return load on before unloading.');
+    const left = Math.max(0, (mf ? mf.deliver : S.craft.cargo) - ck.out);
+    if (left <= 1e-6) return say('NOTHING LEFT TO DELIVER · the manifest is off the vehicle.', 'sys');
+    if (S.craft.cargo <= 1e-6) return no('The hold is empty.');
+    ck.moving = 'OUT';
+    return say(`DELIVERY RUNNING · ${CARGO_RATE} kg/s through the hatchway, ${left.toFixed(0)} kg to go. `
+      + `Watch the mass come off — every burn after this is a different burn.`, 'ok');
+  }
+  case 'LOAD': case 'CARGO': {
+    const ck = dk.cargo, mf = S.manifest;
+    if (dk.phase !== 'HARD') return no('Hard dock required.');
+    if (!dk.vest.hatch) return no('The cargo goes through the hatch — open it first.');
+    if (ck.moving === 'IN') { ck.moving = null; return say(`LOADING STOPPED · ${ck.in.toFixed(0)} kg aboard.`, 'key'); }
+    if (ck.moving === 'OUT') return no('The delivery is still coming off — stop it first.');
+    const want = Math.max(0, (mf ? mf.collect : 0) - ck.in);
+    if (want <= 1e-6) return say('NO RETURN LOAD MANIFESTED.', 'sys');
+    if ((S.craft.cargoMax || 0) - S.craft.cargo <= 1e-6) return no(`The hold is full at ${S.craft.cargoMax} kg.`);
+    ck.moving = 'IN';
+    return say(`LOADING RUNNING · ${CARGO_RATE} kg/s aboard, ${want.toFixed(0)} kg manifested. `
+      + `This is mass you have to fly home and slow down again.`, 'ok');
+  }
+
+  default: return no('Usage: DOCK AUTO|RETRACT|LATCH|RESEAT|UNDOCK · EQUALISE|LEAK|HATCH · UMB|TIE · DUCT|FAN · LINE|XFER · UNLOAD|LOAD');
   }
 }
 </script>
@@ -3411,6 +3697,10 @@ function makeStation(soi, altKm, phaseDeg) {
 function rig(o) {
   Object.assign(S.craft, { name:'—', dry:2200, fuel:0, fuelMax:0, thrust:30, isp:311,
                            rcs:0, rcsMax:0, rcsIsp:220, crew:0, o2:0,
+                           // Capacity is a property of the vehicle, not a
+                           // constant. Nothing that shipped before declares
+                           // either, so both are zero and weigh nothing.
+                           cargo:0, cargoMax:0,
                            slewRate: 4 * Math.PI/180,      // rad/s maximum
                            slewAccel: 2 * Math.PI/180,     // rad/s^2
                            slewPower: 90,                  // W drawn by the wheels while turning
@@ -3606,7 +3896,7 @@ const MISSIONS = [
     'A solar probe falling in toward the Sun. Perihelion is currently {0.18 AU} — and this instrument bus fails at {180 °C}.',
     'Heat scales with the inverse square of solar distance. At 0.18 AU the bus settles near {225 °C} and the vehicle is lost. You have about 87 days before you get there.',
     'You are near aphelion, which is exactly where a periapsis change is cheapest. Raise perihelion above {0.24 AU} — that brings you in near 155 °C, with margin.'],
-  hint:'PLAN PERI 35903489   (0.24 AU)',
+  hint:'PLAN PERI 35903489   (0.24 AU)', next:11,
   setup(){ rig({name:'HELIOS-4', dry:1400, fuel:2600, thrust:12, isp:318, rcs:20});
     setHelio(0.18, 0.90, 170, 0);
     S.thermLimit = 180;
@@ -3662,11 +3952,91 @@ const MISSIONS = [
       check:(s,d)=> d.e.e < 0.02 && d.perAlt > 150 && d.apoAlt < 400 },
   ]
 },
+{
+  /* The first mission that goes somewhere and comes back. It declares PHASES
+     instead of OBJECTIVES, which is what makes it ordered and what gives it a
+     checkpoint at every boundary — an hour of flying must not be lost to one
+     mistake at phase nine.                                                  */
+  id:11, code:'M-10', name:'CARGO RUN',
+  brief:[
+    'Cold and dark at {Cape Auriga} with {1,800 kg} in the hold and a two-stage launcher underneath you. Station {CERES} is at {400 km} and expects the delivery; you bring {1,200 kg} back.',
+    'This is a whole flight, not a manoeuvre. Ten phases: wake the vehicle, launch, park, phase up to CERES, dock, swap the load, undock, deorbit, survive the entry, splash down. Each phase is {checkpointed} — RESTART offers the last one back, or the pad if you would rather start over.',
+    'Cargo is mass. Every kilogram in the hold is lifted by the launcher, carried by every burn, and slowed down again by the air on the way home. Watch the ΔV remaining move while you unload.',
+    'Coming down is the new part. The {ENTRY} page carries the corridor: put periapsis inside the published band before you commit. Too steep and the heating rate takes the shield off in one piece; too shallow and you skim, exit and come round again, spending more of the shield every lap.',
+    'Then {DROGUE} below 25 km and {MAINS} below 6 km — in that order, because the drogue is what brings dynamic pressure down far enough for the mains to survive being streamed. Splashdown wants under {10 m/s}.'],
+  hint:'BATT → PWR UP → LAUNCH → COUNT GO',
+  sys: [],
+  setup(){ rig({name:'AURIGA-10', dry:2400, fuel:1800, thrust:28, isp:311, rcs:120, rcsIsp:220,
+                crew:2, o2:900, cargo:1800, cargoMax:2200,
+                // A capsule built to come home is BLUNT: the heat shield is
+                // the drag area. 26 m² of it against 5 tonnes is a ballistic
+                // coefficient of 190 kg/m², which is what keeps the peak
+                // heating rate inside what the shield is rated for. At 12 m²
+                // — an ordinary spacecraft's figure — there is no surviving
+                // corridor at all: measured, every aim point either burns the
+                // budget through or overruns the rate. Only the spacecraft
+                // carries this; the launcher stages have their own.
+                cda:26, stages: ASCENT_STACK()});
+    // The same launcher M-00 flies, with the same turn through the air — but a
+    // flatter finish above it. This payload is a third of M-00's, so the
+    // filed program puts apoapsis through 185 km while the vehicle is still at
+    // 132 km and doing 3.8 km/s, which is a ballistic arc, not an orbit. Only
+    // the two entries above the atmosphere move: 26° → 22° at 40 km and
+    // 10° → 7° at 130 km. Max Q is unchanged at 36.5 kPa because nothing about
+    // the low turn changed.
+    setPad('EARTH', 0, { count: 600, program: [[0,90],[2,84],[10,58],[40,22],[130,7]] });
+    S.objects = [ makeStation('EARTH', 400, 25) ];
+    S.manifest = { deliver: 1800, collect: 1200 };
+    S.landingAllowed = true;
+    // The shield and the corridor it implies. The band is measured for THIS
+    // airframe — a heavier vehicle penetrates deeper and peaks harder, so the
+    // numbers are not transferable and are not guessed.
+    S.shield.fitted = true; S.shield.band = [CARGO_BAND[0], CARGO_BAND[1]];
+    S.power.battMax = 2400; S.power.batt = 900; S.power.area = 40; },
+  phases:[
+    { name:'POWER UP', text:'Bring every system up. The battery is the only power there is until the fairing goes.',
+      hint:'BATT → BUS → AVIO → ATT → GNC, or PWR UP',
+      check:()=> SYSIDS.every(id => !sysFitted(id) || sysOn(id)) },
+    { name:'LIFT OFF', text:'Release the count and fly the pitch program out of the atmosphere.',
+      hint:'COUNT GO → STAGE when the first stage is dry',
+      check:(s,d)=> d.alt > 140 },
+    { name:'PARKING ORBIT', text:'Shut down at 185 km apoapsis, coast up and circularise.',
+      hint:'MECO at 185 km apoapsis → PLAN CIRC AP',
+      check:(s,d)=> d.e.e < 0.02 && d.perAlt > 150 },
+    { name:'RENDEZVOUS', text:'Phase up to CERES at 400 km and close to inside 30 km.',
+      hint:'TGT STATION → PLAN RDV → PLAN CIRC AP',
+      check:()=>{ const t = targetRel(); return !!t && V.len(t.r) < 30; } },
+    { name:'DOCK', text:'Fly the corridor up the station\'s velocity vector, capture, retract the ring and close the latches.',
+      hint:'DOCK AUTO, or fly it — then DOCK RETRACT → DOCK LATCH',
+      check:(s)=> s.dock.phase === 'HARD' },
+    { name:'CARGO', text:'Equalise, prove the seal, open the hatch, deliver 1,800 kg and take 1,200 kg on.',
+      hint:'DOCK EQUALISE → DOCK LEAK → DOCK HATCH → DOCK UNLOAD → DOCK LOAD',
+      check:(s)=> s.dock.cargo.done },
+    { name:'UNDOCK', text:'Release the latches and back clear of the station.',
+      hint:'DOCK UNDOCK, then drift out to 100 m',
+      check:(s)=>{ if (s.dock.phase !== 'FREE') return false;
+                   const t = targetRel(); return !!t && V.len(t.r) > 0.1; } },
+    { name:'DEORBIT', text:'Put periapsis inside the corridor on the ENTRY page. It is about 100 m/s retrograde.',
+      hint:'PLAN PERI <km> inside the band → ENTRY to check it',
+      check:(s,d)=> s.soi === 'EARTH' && d.perAlt >= CARGO_BAND[0] && d.perAlt <= CARGO_BAND[1] },
+    { name:'ENTRY', text:'Fly it down. Hold the shield forward and watch the rate against its limit.',
+      hint:'ENTRY page · shield budget and heating rate',
+      check:(s,d)=> d.alt < 25 && s.soi === 'EARTH' && !s.shield.gone },
+    { name:'SPLASHDOWN', text:'Drogue below 25 km, mains below 6 km, and under 10 m/s into the water.',
+      hint:'DROGUE → MAINS',
+      check:(s)=> s.status === 'landed' },
+  ]
+},
 ];
+/* The entry corridor published for AURIGA-10, in kilometres of periapsis.
+   Measured on this airframe against the 90 MJ/m² budget and the 420 kW/m² rate
+   limit, not carried over from another vehicle: a heavier ship penetrates
+   deeper before it decelerates and peaks harder for the same aim point. */
+const CARGO_BAND = [-40, 80];
 /* The roster reads as a ladder, and launch comes before insertion. Ids are not
    renumbered to say so — they are saved in the flight record and every suite
    calls them by number — so the order is stated here instead. */
-const ROSTER_ORDER = [10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0];
+const ROSTER_ORDER = [10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 0];
 const rosterList = () => ROSTER_ORDER.map(id => MISSIONS.find(m => m.id === id)).filter(Boolean);
 
 function loadMission(id) {
@@ -3685,9 +4055,18 @@ function loadMission(id) {
   S.loads = { HEAT:true, SCI:false, COMM:true };
   S.flags = { lunarSOI:false, perihelionPassed:false };
   S.warnedPower = S.warnedTherm = S.warnedAtmo = S.warnedBus = S.warnedQ = false;
+  S.warnedEntryWarp = false;
   S.o2Warn = 0;
   S.throttle = 1; S.pad = null; S.fairing = false;
+  S.shield = freshShield(); S.chute = freshChutes();
+  S.manifest = null; S.phases = null; S.phase = 0; S.checkpoints = [];
   m.setup();
+  // A mission declares `phases` INSTEAD of `obj` when it wants them ordered.
+  // Everything that shipped before declares `obj` and never reaches this.
+  if (m.phases) {
+    S.phases = m.phases.map(p => ({ ...p, done:false }));
+    S.phase = 0;
+  }
   // Which systems this vehicle wakes up with. `sys` omitted means all of them,
   // which is how every scripted mission has always booted and still does; an
   // explicit list is the cold (or partly cold) case, and [] is fully dark.
@@ -3699,7 +4078,7 @@ function loadMission(id) {
   // A dark vehicle has no platform to hold an attitude against.
   if (!sysOn('GNC')) S.att.mode = 'FREE';
   S.mission = m;
-  S.objectives = m.obj.map(o => ({ ...o, done:false }));
+  S.objectives = (m.obj || []).map(o => ({ ...o, done:false }));
   derive(); fitView();
   logEl.innerHTML = '';
   // The scratchpad belongs to the flight that just ended. Leaving a standing
@@ -3710,12 +4089,20 @@ function loadMission(id) {
   clearMessage();
   head(`${m.code} · ${m.name}`);
   m.brief.forEach(b => { say(b, 'out'); say(''); });
-  if (S.objectives.length) {
+  if (S.phases) {
+    // One phase at a time, and the one you are on. The whole list would be ten
+    // paragraphs about things you are not doing yet.
+    const ph = S.phases[0];
+    say(`PHASE 1 of ${S.phases.length} · ${ph.name}`, 'hd');
+    say(`  ${ph.text}`, 'out');
+  } else if (S.objectives.length) {
     say('OBJECTIVES', 'hd');
     S.objectives.forEach((o,i) => say(`  ${i+1}. ${o.text}`, 'out'));
   }
   say('');
-  if (m.hint) row('PROCEDURE', m.hint, 'ok');
+  const ph0 = S.phases ? S.phases[0] : null;
+  if (ph0 && ph0.hint) row('PROCEDURE', ph0.hint, 'ok');
+  else if (m.hint) row('PROCEDURE', m.hint, 'ok');
   row('CLOCK', 'HOLD', 'sys');
   // Said last and at warning severity so it is the line standing on the
   // scratchpad when the player looks up at a display that is telling them
@@ -3734,10 +4121,63 @@ function loadMission(id) {
 }
 
 /* ---- objectives -------------------------------------------- */
+function completeMission() {
+  S.completed = true;
+  // let a running burn finish — cutting the engine here would strand the vehicle
+  // mid-maneuver on the very burn that met the objective
+  if (S.burn) S.pauseAfterBurn = true; else S.warp = 0;
+  say('', 'out');
+  head('MISSION COMPLETE · ' + S.mission.code);
+  row('ELAPSED', fmtMET(S.t));
+  row('ΔV EXPENDED', fmtDV(S.ledger.dvUsed));
+  row('BURNS', String(S.ledger.burns));
+  row('PROP LEFT', S.craft.fuel.toFixed(1) + ' kg');
+  say('');
+  const nxt = MISSIONS.find(m => m.id === (S.mission.next != null ? S.mission.next : S.mission.id + 1));
+  if (nxt) row('NEXT', `MIS ${nxt.id}   ${nxt.code} ${nxt.name}`, 'sys');
+  else row('ROSTER', 'all scripted missions flown', 'sys');
+  say('MISSION COMPLETE · ' + S.mission.code, 'ok');
+  markComplete(S.mission.id);
+}
+
+/* ---- ordered phases -----------------------------------------------------
+   The flat list is right for "raise periapsis, then circularise": two checks
+   that can latch in any order without meaning anything wrong. It is wrong for
+   a ten-phase flight, where a splashdown check would happily latch while the
+   vehicle is still bolted to the pad.
+
+   So ordering is OPT-IN. A mission declares `phases` instead of `obj` and gets
+   one check at a time, a checkpoint at every boundary and a per-phase
+   briefing. A mission that declares `obj` — which is all nine that shipped
+   before this — walks exactly the code it always walked.                   */
+const curPhase = () => S.phases ? S.phases.find(p => !p.done) || null : null;
+
+function checkPhases() {
+  const ph = curPhase();
+  if (!ph) return;
+  let ok = false;
+  try { ok = !!ph.check(S, D); } catch (err) { ok = false; }
+  if (!ok) return;
+  ph.done = true;
+  S.phase = S.phases.filter(p => p.done).length;
+  say(`PHASE COMPLETE · ${ph.name}`, 'ok');
+  // The checkpoint is taken AFTER the phase is marked, so resuming it puts the
+  // vehicle at the start of the phase that follows rather than replaying one
+  // that is already flown.
+  takeCheckpoint(ph.name);
+  const nxt = curPhase();
+  if (nxt) {
+    say(`NEXT · ${nxt.name} — ${nxt.text}`, 'key');
+    if (nxt.hint) row('PROCEDURE', nxt.hint, 'ok');
+  } else completeMission();
+}
+
 function checkObjectives() {
-  if (S.status === 'lost' || S.completed || !S.objectives.length) return;
+  if (S.status === 'lost' || S.completed) return;
   if (S.soi === 'MOON') S.flags.lunarSOI = true;
   if (S.soi === 'SUN' && D.e && D.e.r < D.e.rp*1.02 && D.e.e > 0.05) S.flags.perihelionPassed = true;
+  if (S.phases) return checkPhases();
+  if (!S.objectives.length) return;
   let changed = false;
   for (const o of S.objectives) {
     if (o.done) continue;
@@ -3745,24 +4185,60 @@ function checkObjectives() {
     try { ok = !!o.check(S, D); } catch (err) { ok = false; }
     if (ok) { o.done = true; changed = true; say(`OBJECTIVE MET · ${o.text}`, 'ok'); }
   }
-  if (changed && S.objectives.every(o => o.done) && !S.completed) {
-    S.completed = true;
-    // let a running burn finish — cutting the engine here would strand the vehicle
-    // mid-maneuver on the very burn that met the objective
-    if (S.burn) S.pauseAfterBurn = true; else S.warp = 0;
-    say('', 'out');
-    head('MISSION COMPLETE · ' + S.mission.code);
-    row('ELAPSED', fmtMET(S.t));
-    row('ΔV EXPENDED', fmtDV(S.ledger.dvUsed));
-    row('BURNS', String(S.ledger.burns));
-    row('PROP LEFT', S.craft.fuel.toFixed(1) + ' kg');
-    say('');
-    const nxt = MISSIONS.find(m => m.id === (S.mission.next != null ? S.mission.next : S.mission.id + 1));
-    if (nxt) row('NEXT', `MIS ${nxt.id}   ${nxt.code} ${nxt.name}`, 'sys');
-    else row('ROSTER', 'all scripted missions flown', 'sys');
-    say('MISSION COMPLETE · ' + S.mission.code, 'ok');
-    markComplete(S.mission.id);
+  if (changed && S.objectives.every(o => o.done) && !S.completed) completeMission();
+}
+
+/* ---- checkpoints --------------------------------------------------------
+   An hour of flying must not be lost to one mistake at phase nine. Everything
+   a phase boundary needs is already in `S` and `S` is plain data — position,
+   velocity, mass, cargo, consumables, systems, dock state, the shield's
+   budget — so a checkpoint is a deep copy of it with the three things that
+   are not data left out: the mission record and the phase list both carry
+   `check` functions, and the checkpoint list itself must not contain itself.
+
+   Measured: the copy is under 4 kB and restoring one and flying on 4,000 s
+   lands on the same state vector, mass, battery and hull as an uninterrupted
+   flight, to the last bit.                                                  */
+const CHECKPOINT_SKIP = ['mission', 'objectives', 'phases', 'checkpoints'];
+function snapState() {
+  const out = {};
+  for (const k of Object.keys(S)) {
+    if (CHECKPOINT_SKIP.includes(k)) continue;
+    out[k] = S[k] === undefined ? null : JSON.parse(JSON.stringify(S[k]));
   }
+  out.__objDone = S.objectives.map(o => o.done);
+  out.__phaseDone = S.phases ? S.phases.map(p => p.done) : null;
+  return out;
+}
+function takeCheckpoint(name) {
+  S.checkpoints.push({ name, t: S.t, phase: S.phase, snap: snapState() });
+  // Only the last one is ever offered, so there is no reason to grow forever.
+  if (S.checkpoints.length > 12) S.checkpoints.shift();
+  say(`CHECKPOINT · ${name} at ${fmtMET(S.t)}. RESTART will offer this point back.`, 'sys');
+}
+const lastCheckpoint = () => S.checkpoints.length ? S.checkpoints[S.checkpoints.length - 1] : null;
+
+function restoreCheckpoint() {
+  const cp = lastCheckpoint();
+  if (!cp) return 'No checkpoint has been taken on this flight.';
+  const snap = cp.snap;
+  for (const k of Object.keys(snap)) {
+    if (k.startsWith('__')) continue;
+    S[k] = JSON.parse(JSON.stringify(snap[k]));
+  }
+  S.objectives.forEach((o, i) => o.done = !!snap.__objDone[i]);
+  if (S.phases && snap.__phaseDone) S.phases.forEach((p, i) => p.done = !!snap.__phaseDone[i]);
+  S.status = 'flight'; S.warp = 0;
+  derive(); fitView();
+  // The log is a record of what actually happened and rewriting it would be a
+  // worse lie than leaving it. One line says where the flight has been put
+  // back to, and that is the whole of the restoration the player is told.
+  const ph = curPhase();
+  say(`RESUMED AT CHECKPOINT · ${cp.name} complete, MET ${fmtMET(cp.t)}.`
+    + (ph ? ` Next is ${ph.name} — ${ph.text}` : ''), 'key');
+  if (ph && ph.hint) row('PROCEDURE', ph.hint, 'ok');
+  if (typeof gotoPage === 'function') gotoPage('MSN');
+  return null;
 }
 function cmdMis(A) {
   if (A[0] !== undefined && A[0] !== '') {
@@ -4314,8 +4790,8 @@ DOCK: Object.assign({ count: () => 2, title: (i) => i ? 'CAPTURE' : 'PROXIMITY O
     return rows;
   } }),
 
-UTIL: { count: () => 4, title: () => 'UTILITIES',
-  sub: () => ['VESTIBULE', 'ELECTRICAL', 'ECLSS', 'PROPELLANT'][CDU.sub] || '',
+UTIL: { count: () => S.manifest ? 5 : 4, title: () => 'UTILITIES',
+  sub: () => ['VESTIBULE', 'ELECTRICAL', 'ECLSS', 'PROPELLANT', 'CARGO'][CDU.sub] || '',
   build: (pg) => {
     const dk = S.dock, foot = { l: NAV('<DOCK', 'DOCK'), r: NAV('MENU>', 'MENU') };
     if (dk.phase !== 'HARD') return [
@@ -4387,6 +4863,34 @@ UTIL: { count: () => 4, title: () => 'UTILITIES',
         { full: F('Procedure', dk.vest.hatch
             ? 'The trunk runs through the open hatchway. With the fan running the station scrubs and supplies your air, and your own O₂ stops going down.'
             : 'The duct runs through the hatch, so the hatch has to be open first — see the VESTIBULE page.', 'body'), wrap: true },
+        foot,
+      ];
+    }
+    if (pg === 4) {
+      const ck = dk.cargo, mf = S.manifest || { deliver:0, collect:0 };
+      const outLeft = Math.max(0, mf.deliver - ck.out), inLeft = Math.max(0, mf.collect - ck.in);
+      const cap = S.craft.cargoMax || 0;
+      return [
+        { l: F('In the hold', `${S.craft.cargo.toFixed(0)} / ${cap.toFixed(0)} kg`,
+               S.craft.cargo > cap ? 'bad' : 'ok'),
+          r: F('All-up mass', craftMass().toFixed(0) + ' kg', 'ok') },
+        { l: F('Delivered', `${ck.out.toFixed(0)} / ${mf.deliver.toFixed(0)} kg`, outLeft <= 1e-6 ? 'ok' : ''),
+          r: F('Return load', `${ck.in.toFixed(0)} / ${mf.collect.toFixed(0)} kg`, inLeft <= 1e-6 && mf.collect ? 'ok' : '') },
+        { l: F('Flow', ck.moving ? CARGO_RATE.toFixed(1) + ' kg/s ' + (ck.moving === 'OUT' ? 'OUT' : 'IN') : '0.0 kg/s',
+               ck.moving ? 'ok' : 'dim'),
+          r: F('ΔV remaining', dv(), 'ok') },
+        { l: K(ck.moving === 'OUT' ? '<STOP DELIVERY*' : '<DELIVER CARGO*',
+               dk.vest.hatch && (outLeft > 1e-6 || ck.moving === 'OUT') ? 'go' : 'dim', 'UNLOAD'),
+          r: K(ck.moving === 'IN' ? 'STOP LOADING*' : 'TAKE RETURN LOAD*',
+               dk.vest.hatch && (inLeft > 1e-6 || ck.moving === 'IN') ? 'go' : 'dim', 'LOAD') },
+        { l: F('Manifest', ck.done ? 'COMPLETE' : outLeft > 1e-6 ? 'DELIVERY DUE' : 'RETURN LOAD DUE',
+               ck.done ? 'ok' : 'go'),
+          r: F('Through the hatch', CARGO_RATE.toFixed(1) + ' kg/s') },
+        { full: F('Procedure', !dk.vest.hatch
+            ? 'Cargo goes through the hatchway hand over hand, so the hatch has to be open — see the VESTIBULE page.'
+            : ck.done
+              ? 'The manifest is complete. The vehicle is a different weight from the one that flew up here: re-plan the deorbit rather than reusing the number you had.'
+              : 'Deliver the outbound load first, then take the return load on. Watch the all-up mass and the ΔV remaining — this is the same tank against a heavier ship.', 'body'), wrap: true },
         foot,
       ];
     }
@@ -4580,6 +5084,13 @@ THRM: Object.assign(one('THERMAL'), { sub: () => D.ecl ? 'ECLIPSE' : 'SUNLIT', b
       r: F('Structural limit', tl + ' °C') },
     { l: F('Solar flux', D.flux.toFixed(0) + ' W/m²'), r: F('Relative to Earth', (D.flux/1361).toFixed(2) + '×') },
     { l: F('Solar distance', (D.dSun/AU).toFixed(4) + ' AU'), r: F('Illumination', D.ecl ? 'ECLIPSE' : 'SUNLIT') },
+    // The heat shield is thermal protection and belongs beside the hull it is
+    // protecting. The ENTRY page is a link from here and from the index — not
+    // a thirteenth function key.
+    { l: F('Heat shield', !S.shield.fitted ? 'NOT FITTED' : S.shield.gone ? 'BURNED THROUGH'
+             : (100 - S.shield.load/S.shield.cap*100).toFixed(0) + '%',
+           !S.shield.fitted ? 'dim' : S.shield.gone ? 'bad' : S.shield.load > S.shield.cap*0.6 ? 'go' : 'ok'),
+      r: NAV('ENTRY>', 'ENTR') },
     h > tl*0.55
       ? { full: F('Caution', `Hull at ${h.toFixed(0)} °C against a ${tl} °C limit. Heat load rises with the inverse square of solar distance, so raising perihelion is the only real remedy.`, 'go'), wrap: true }
       : {},
@@ -4629,6 +5140,94 @@ LIFE: Object.assign(one('LIFE SUPPORT'), { sub: () => S.craft.crew ? S.craft.cre
       r: S.dock.phase === 'HARD' ? NAV('UTILITIES>', 'UTIL') : NAV('POWER>', 'PWR') },
   ]; } }),
 
+/* ---- coming home --------------------------------------------------------
+   The corridor has to be readable BEFORE you commit, the way max Q is shown
+   against its design limit on the LAUNCH page. Flying blind into a two-sided
+   limit is a coin toss, not a puzzle.                                       */
+ENTR: { count: () => 2, title: (i) => i ? 'RECOVERY' : 'ENTRY',
+  sub: () => { const sh = S.shield;
+    return !sh.fitted ? 'NO SHIELD' : sh.gone ? 'SHIELD GONE'
+         : inAtmosphere() ? 'IN THE AIR' : 'ARMED'; },
+  build: (pg) => {
+    const sh = S.shield, b = soiBody();
+    const foot = { l: NAV('<MENU', 'MENU'), r: pg === 0 ? NAV('RECOVERY>', 'ENTR#1') : NAV('ORBIT>', 'ORB') };
+    if (pg === 1) {
+      const rows = [];
+      for (const id of ['DROGUE', 'MAIN']) {
+        const def = CHUTES[id], c = S.chute[id];
+        const armed = b.rho0 && D.alt <= def.arm && !S.fairing;
+        const inf = c.state === 'OUT' ? Math.min(1, c.t / def.infl) : 0;
+        rows.push({ l: F(def.label, c.state === 'OUT' ? `${gauge(inf)} ${(inf*100).toFixed(0)}%` : c.state,
+                         c.state === 'TORN' ? 'bad' : c.state === 'OUT' ? 'ok' : 'dim'),
+          r: F(`Below ${def.arm} km`,
+               c.state === 'STOWED' ? (armed ? 'ARMED' : 'TOO HIGH') : '——',
+               c.state !== 'STOWED' ? 'dim' : armed ? 'ok' : 'go') });
+      }
+      const seaLim = b.ocean;
+      const next = S.chute.DROGUE.state === 'STOWED' ? CHUTES.DROGUE
+                 : S.chute.MAIN.state === 'STOWED' ? CHUTES.MAIN : null;
+      rows.push({ l: F('Dynamic pressure', (D.q/1000).toFixed(2) + ' kPa',
+                       next && D.q > next.qTear ? 'bad' : 'ok'),
+        r: next ? F('Tears them over', (next.qTear/1000).toFixed(2) + ' kPa',
+                    D.q > next.qTear ? 'bad' : 'ok')
+                : F('Altitude', D.alt < 10 ? (D.alt*1000).toFixed(0) + ' m' : D.alt.toFixed(1) + ' km') });
+      rows.push({ l: F('Descent rate', (-D.e.vr*1000).toFixed(1) + ' m/s',
+                       Math.abs(D.e.vr*1000) < (seaLim ? 10 : 4) ? 'ok' : 'go'),
+        r: F('Airspeed', (D.vAir*1000).toFixed(0) + ' m/s') });
+      rows.push({ l: F('', '<STREAM DROGUE*', S.chute.DROGUE.state === 'STOWED' ? 'go' : 'dim',
+                       () => { const m = deployChute('DROGUE'); if (m) say(m, 'err'); }),
+        r: F('', 'STREAM MAINS*', S.chute.MAIN.state === 'STOWED' ? 'go' : 'dim',
+             () => { const m = deployChute('MAIN'); if (m) say(m, 'err'); }) });
+      rows.push({ full: F('Procedure', !b.rho0
+        ? `${b.name} has no air. There is nothing here for a canopy to bite on.`
+        : `Drogue below ${CHUTES.DROGUE.arm} km, and it is what brings dynamic pressure down far enough to stream the mains — `
+          + `at ${CHUTES.MAIN.arm} km on the shield alone you are still near 1.9 kPa and the mains would come straight off. `
+          + `${seaLim ? `Splashdown wants under 10 m/s vertical and 8 m/s lateral, measured against the air, not against the stars.`
+                      : `Touchdown wants under 4 m/s vertical and 3 m/s lateral.`}`, 'body'), wrap: true });
+      rows.push(foot);
+      return rows;
+    }
+    if (!sh.fitted) return [
+      { l: F('Heat shield', 'NOT FITTED', 'bad'), r: F('Vehicle', S.craft.name) },
+      { full: F('', 'This vehicle has no thermal protection. It can fly through the top of an atmosphere, '
+        + 'and it cannot come down through one — the hull reaches well over a thousand degrees on the way in '
+        + `and the bus limit is ${(S.thermLimit||800)} °C.`, 'body'), wrap: true },
+      { l: F('Hull', S.therm.hull.toFixed(0) + ' °C', S.therm.hull > (S.thermLimit||800)*0.8 ? 'bad' : 'ok'),
+        r: F('Dynamic pressure', (D.q/1000).toFixed(2) + ' kPa') },
+      {}, {},
+      foot,
+    ];
+    const left = Math.max(0, sh.cap - sh.load), frac = left / sh.cap;
+    const band = sh.band;
+    const pe = D.perAlt;
+    const inBand = band ? (pe >= band[0] && pe <= band[1]) : null;
+    return [
+      { l: F('Heat shield', sh.gone ? 'BURNED THROUGH' : `${gauge(frac)} ${(frac*100).toFixed(0)}%`,
+             sh.gone ? 'bad' : frac < 0.15 ? 'bad' : frac < 0.4 ? 'go' : 'ok'),
+        r: F('Absorbed', `${(sh.load/1e6).toFixed(1)} / ${(sh.cap/1e6).toFixed(0)} MJ/m²`, sh.gone ? 'bad' : '') },
+      { l: F('Heating rate', (sh.rate/1000).toFixed(0) + ' kW/m²',
+             sh.rate > sh.rateLimit*0.85 ? 'bad' : sh.rate > 0 ? 'go' : 'dim'),
+        r: F(`Rate limit`, (sh.rateLimit/1000).toFixed(0) + ' kW/m²',
+             sh.rate > sh.rateLimit*0.85 ? 'bad' : 'ok') },
+      { l: F('Peak so far', (sh.peak/1000).toFixed(0) + ' kW/m²', sh.peak ? 'go' : 'dim'),
+        r: F('Hull', S.therm.hull.toFixed(0) + ' °C', S.therm.hull > (S.thermLimit||800)*0.8 ? 'bad' : 'ok') },
+      { l: F('Periapsis', pe > -9999 ? pe.toFixed(0) + ' km' : '——',
+             inBand === null ? '' : inBand ? 'ok' : 'bad'),
+        r: band ? F('Corridor', `${band[0].toFixed(0)} to ${band[1].toFixed(0)} km`, inBand ? 'ok' : 'go')
+                : F('Corridor', 'NOT PUBLISHED', 'dim') },
+      { l: F('Aim', !band ? '——' : inBand ? 'IN THE CORRIDOR'
+              : pe > band[1] ? 'TOO SHALLOW' : 'TOO STEEP',
+             !band ? 'dim' : inBand ? 'ok' : 'bad'),
+        r: F('Altitude', D.alt.toFixed(0) + ' km') },
+      { full: F('Procedure', !band
+          ? 'No corridor is published for this airframe. Watch the rate against its limit and the budget against what is left of it.'
+          : `Put periapsis between ${band[0].toFixed(0)} and ${band[1].toFixed(0)} km and fly it down. `
+            + `Too steep and the heating rate takes the shield off in one piece. Too shallow and you skim, exit, and come round again — `
+            + `every lap spends more of the ${(sh.cap/1e6).toFixed(0)} MJ/m² budget, and when it is gone the hull is next.`, 'body'), wrap: true },
+      foot,
+    ];
+  } },
+
 MSN: {
   count: () => S.mission ? 2 : 1,
   title: () => 'MISSION',
@@ -4637,10 +5236,34 @@ MSN: {
     if (!S.mission) return [{ full: F('', 'NO MISSION LOADED', 'dim') },
                             { l: NAV('<ROSTER', 'ROSTER'), r: NAV('MENU>', 'MENU') }];
     if (pg === 1) {
-      // the briefing: free text, as many lines as it takes
-      const rows = S.mission.brief.map(t => ({ full: F('', t.replace(/[{}]/g, ''), 'body'), wrap: true }));
-      rows.push({ full: F('Procedure', S.mission.hint || '—', 'ok'), wrap: true });
-      rows.push({ l: NAV('<OBJECTIVES', 'MSN'), r: NAV('ROSTER>', 'ROSTER') });
+      // The briefing. On an ordered mission it is the CURRENT PHASE's briefing:
+      // ten phases' worth of text on a 375 px screen is not a briefing, it is a
+      // wall, and nine of the ten are about something you are not doing yet.
+      const ph = curPhase();
+      const text = ph && ph.brief ? ph.brief : S.mission.brief;
+      const rows = text.map(t => ({ full: F('', t.replace(/[{}]/g, ''), 'body'), wrap: true }));
+      rows.push({ full: F('Procedure', (ph && ph.hint) || S.mission.hint || '—', 'ok'), wrap: true });
+      rows.push({ l: NAV(S.phases ? '<PHASE' : '<OBJECTIVES', 'MSN'), r: NAV('ROSTER>', 'ROSTER') });
+      return rows;
+    }
+    // --- ordered missions show the phase they are on, not a wall of ten ---
+    if (S.phases) {
+      const ph = curPhase();
+      const n = S.phases.length, done = S.phases.filter(p => p.done).length;
+      const cp = lastCheckpoint();
+      const rows = [
+        { l: F('Mission', S.mission.name, 'ok'),
+          r: F('Phase', `${Math.min(done+1, n)} of ${n}`, S.completed ? 'ok' : 'go') },
+        { full: F(S.completed ? 'Complete' : `Phase ${Math.min(done+1, n)} · ${ph ? ph.name : '—'}`,
+                  S.completed ? 'All phases flown.' : (ph ? ph.text : '—'), S.completed ? 'ok' : 'go'), wrap: true },
+        { l: F('Last complete', done ? S.phases[done-1].name : 'NONE', done ? 'ok' : 'dim'),
+          r: F('Checkpoint', cp ? fmtMET(cp.t) : 'NONE', cp ? 'ok' : 'dim') },
+        { l: F('Elapsed', fmtMET(S.t)), r: F('ΔV expended', fmtDV(S.ledger.dvUsed)) },
+        { full: F('Procedure', (ph && ph.hint) || S.mission.hint || '—', 'ok'), wrap: true },
+        { l: F('', cp ? '<RESUME LAST PHASE*' : '<NO CHECKPOINT', cp ? 'go' : 'dim',
+               cp ? () => exec('RESTART PHASE') : null),
+          r: F('', 'FROM THE PAD*', 'go', () => exec('RESTART PAD')) },
+      ];
       return rows;
     }
     const rows = [{ full: F('Mission', S.mission.name, 'ok') }];
@@ -4696,7 +5319,13 @@ MENU: { count: () => 2, title: () => 'INDEX', sub: () => '', build: (pg) => pg =
     // opening while there is still a pad under the vehicle.
     { l: NAV('<LAUNCH', 'LNCH'), r: F('Throttle', (S.throttle*100).toFixed(0) + '%',
                                        S.throttle < 1 ? 'go' : 'dim') },
-    { l: NAV('<ORBIT', 'ORB'), r: F('', '', 'dim') },
+    // Entry is the other end of the same journey and gets the same treatment:
+    // a link, not a thirteenth key. Items 02 and 03 both refused one and so
+    // does this.
+    { l: NAV('<ENTRY', 'ENTR'),
+      r: S.shield.fitted ? F('Heat shield', (100 - S.shield.load/S.shield.cap*100).toFixed(0) + '%',
+                             S.shield.gone ? 'bad' : S.shield.load > S.shield.cap*0.6 ? 'go' : 'ok')
+                         : F('Heat shield', 'NOT FITTED', 'dim') },
   ] },
 
 HELP: { count: () => HELP_PAGES.length, title: () => 'REFERENCE', sub: () => HELP_PAGES[CDU.sub].t,
@@ -4745,6 +5374,14 @@ const HELP_PAGES = [
     ['RATES', 'The corridor turns with the station: sitting still in space slides you sideways across it.', 'go'],
     ['GATE', 'Under 0.15 m/s, inside 0.25 m, nose within 10°. Half of that is a clean capture.'],
     ['THEN', 'RETRACT the ring, close the LATCHES, then the four utility procedures on UTIL.'],
+  ] },
+  { t: 'COMING HOME', rows: [
+    ['CORRIDOR', 'ENTRY publishes a band of periapsis. Put yours inside it before you commit — it is about 100 m/s retrograde from a 400 km orbit.', 'ok'],
+    ['TOO STEEP', 'The heating rate overruns what the shield is rated for and it comes off in one piece. Aim higher and the peak falls.'],
+    ['TOO SHALLOW', 'You skim, exit, and come round for another pass. Every lap spends more of the shield\'s budget; when it is gone the hull is next.', 'go'],
+    ['SHIELD', 'Two numbers, both on ENTRY: a total it can absorb, and a rate it cannot survive for an instant. Hull temperature is a bus limit and is not the instrument.'],
+    ['CANOPIES', 'DROGUE below 25 km, then MAINS below 6 km. In that order: the drogue is what brings dynamic pressure down far enough for the mains to survive being streamed.', 'ok'],
+    ['SPLASHDOWN', 'Under 10 m/s into the water, measured against the air rather than against the stars — under a canopy you are moving with the planet.'],
   ] },
 ];
 

@@ -27,8 +27,13 @@ const LATE = [
   'pitchToTheta', 'currentPitch', 'launchWindow', 'dynPressure', 'airDensity',
   'airPressure', 'dragAcc', 'inAtmosphere', 'curThrust', 'curIsp', 'curFlow',
   'ASCENT_STACK', 'PITCH_DEFAULT', 'ASCENT_TIME', 'ASCENT_ARC', 'PARK_ALT',
-  'Q_BREAK', 'HEAT_NOSE', 'fmtCount', 'rosterList', 'ROSTER_ORDER', 'rig',
+  'Q_BREAK', 'HEAT_NOSE', 'fmtCount', 'rosterList', 'ROSTER_ORDER', 'rig', 'updateHUD',
   'burnStep', 'stepSystems', 'checkHazards', 'padPlace', 'ZEROV', 'stepCount',
+  // item 04: cargo, the entry corridor, the canopies, phases and checkpoints
+  'CHUTES', 'chuteArea', 'deployChute', 'stepChutes', 'freshShield', 'freshChutes',
+  'SHIELD_LOAD', 'SHIELD_RATE', 'CARGO_BAND', 'CARGO_RATE', 'stepCargo', 'airRelative',
+  'curPhase', 'checkPhases', 'takeCheckpoint', 'restoreCheckpoint', 'lastCheckpoint',
+  'snapState', 'completeMission',
 ];
 
 function boot(file = GAME) {
@@ -85,6 +90,8 @@ function boot(file = GAME) {
 };
 ` + LATE.map(n => `try { globalThis.__G.${n} = ${n}; } catch (e) {}`).join('\n'));
 
+  // The descent readout, so a test can assert the frame it is displayed in.
+  globalThis.__G.LAT_EL = global.document.getElementById('d-tapo');
   const G = globalThis.__G;
   G.LOG = LOG;
   G.lines = () => LOG.map(l => l.__line);

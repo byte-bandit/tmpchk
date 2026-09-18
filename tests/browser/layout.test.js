@@ -131,6 +131,47 @@ const { suite } = require('../harness');
     ok('all three LAUNCH pages fit, labels and values', lnchBad.length===0,
        lnchBad.join(' | ') || seen.join(' / '));
 
+    // Coming home. The ENTRY pages carry the corridor, the shield budget and
+    // the canopy envelopes, and the fifth UTILITIES sub-page carries the cargo
+    // — all of it added by item 04 and none of it seen at 375 px before.
+    await p.fill('#cmd','MIS 11'); await p.press('#cmd','Enter'); await p.waitForTimeout(300);
+    await p.evaluate(()=>{ const f=[...document.querySelectorAll('.fld')].find(e=>/BATTERY TIE/.test(e.textContent)); if(f) f.click(); });
+    await p.waitForTimeout(250);
+    await p.fill('#cmd','ENTRY'); await p.press('#cmd','Enter'); await p.waitForTimeout(300);
+    let entBad = [], entSeen = [];
+    for (let i=0;i<2;i++) {
+      const e = await p.evaluate(()=>({ title: document.getElementById('cdu-t').textContent.trim(),
+        scrollX: document.documentElement.scrollWidth > window.innerWidth+1,
+        text: document.getElementById('cdu-body').textContent,
+        clip: [...document.querySelectorAll('.fval, .flab')]
+          .filter(el=>el.textContent.trim() && el.scrollWidth > el.clientWidth + 1).map(el=>el.textContent.slice(0,30)) }));
+      entSeen.push(e.title);
+      if (e.scrollX || e.clip.length) entBad.push(e.title+':'+(e.clip.join(',')||'scroll'));
+      await p.__press('#pg-next'); await p.waitForTimeout(200);
+    }
+    ok('both ENTRY pages fit, labels and values', entBad.length===0,
+       entBad.join(' | ') || entSeen.join(' / '));
+    ok('and the corridor is readable before committing to it', /Corridor/.test(
+       await p.evaluate(()=>{ gotoPage('ENTR',0); renderCDU(); return document.getElementById('cdu-body').textContent; })));
+    ok('ENTRY is a link, not a 13th function key', g.pkCount===12);
+
+    // Stand the vehicle in a hard dock with the hatch open so the cargo page
+    // is the real one rather than the INHIBITED placeholder.
+    await p.evaluate(()=>{ S.dock.phase='HARD'; S.dock.vest.leakOk=true; S.dock.vest.hatch=true;
+                           S.dock.pwr.umb=true; S.dock.pwr.tie=true; derive(); gotoPage('UTIL',4); renderCDU(); });
+    await p.waitForTimeout(250);
+    const cargoPg = await p.evaluate(()=>({ title: document.getElementById('cdu-t').textContent.trim(),
+      sub: document.getElementById('cdu-sub').textContent.trim(),
+      text: document.getElementById('cdu-body').textContent,
+      scrollX: document.documentElement.scrollWidth > window.innerWidth+1,
+      clip: [...document.querySelectorAll('.fval, .flab')]
+        .filter(el=>el.textContent.trim() && el.scrollWidth > el.clientWidth + 1).map(el=>el.textContent.slice(0,30)) }));
+    ok('the CARGO sub-page of UTILITIES fits', !cargoPg.scrollX && cargoPg.clip.length===0 && cargoPg.sub==='CARGO',
+       cargoPg.sub + ' — ' + (cargoPg.clip.join(' | ') || 'clean'));
+    ok('and it shows the hold, the manifest and what carrying it costs',
+       /DELIVER CARGO/.test(cargoPg.text) && /1800/.test(cargoPg.text) && /remaining/.test(cargoPg.text),
+       (cargoPg.text.match(/In the hold[^A-Z]*/) || ['—'])[0].slice(0, 40));
+
     ok('no page errors', errs.length===0, errs.join('|'));
     await ctx.close();
   }

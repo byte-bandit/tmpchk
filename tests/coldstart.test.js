@@ -263,11 +263,17 @@ for (const id of [3, 5, 6, 0]) {
 /* ---------- 12. warm missions are untouched ---------- */
 console.log('\nWARM MISSIONS ARE UNTOUCHED');
 const warmLoads = [];
+// A mission that DECLARES `sys` has chosen to start cold or partly cold —
+// that is the whole of item 02's mechanism. Free flight and M-10 both do.
+// Everything that does not declare one is warm, and warm is what must not move.
 for (const m of MISSIONS) {
-  if (m.id === 0) continue;
+  if (m.sys) continue;
   loadMission(m.id);
   warmLoads.push([m.code, G.D.load, allUp(), S.craft.crew]);
 }
+ok('the cold-start missions are the ones that ask to be',
+   MISSIONS.filter(m => m.sys).map(m => m.code).sort().join(',') === 'FREE,M-10',
+   MISSIONS.filter(m => m.sys).map(m => m.code).join(',') || 'none');
 ok('every scripted mission still boots with everything running',
    warmLoads.every(w => w[2]), warmLoads.filter(w => !w[2]).map(w => w[0]).join(',') || 'all warm');
 ok('a crewed one draws exactly the 340 W it always drew',

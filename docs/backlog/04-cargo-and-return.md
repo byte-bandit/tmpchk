@@ -1,6 +1,6 @@
 # 04 — Cargo run: launch, deliver, come home
 
-**Status:** not started
+**Status:** **DONE**
 **Depends on:** 01 (docking), 02 (cold start), 03 (launch) — all shipped
 
 The first of three full-arc missions. Where the existing ladder teaches one
@@ -32,9 +32,19 @@ ENTRY : status lost | peak hull 800 °C | thermal failure
 ```
 
 and with the thermal limit out of the way, drag alone leaves it arriving at the
-surface at **~580 m/s**. There is no heat shield, no parachute, no water, and
-no notion of a survivable entry corridor. `grep -c 'cargo\|chute\|parachute\|splash'`
-over `index.html` returns zero for all of them.
+surface at **578 m/s** — but only for the free-flight TESTBED with full tanks
+(22,700 kg, Cd·A 9 m², a ballistic coefficient of 2,522 kg/m²), and **464.6 m/s
+of that is the planet turning underneath it**. It is an inertial-frame number.
+Measured against the air, that vehicle arrives at 227 m/s; every other shipped
+airframe arrives at 468–474 m/s inertial and **55–94 m/s air-relative**
+(AURIGA-1 dry 55, M-02 66, M-03 68, M-06 EAGLE 94). The original figure here
+generalised one measurement to every vehicle and was corrected in item 04.
+
+There is no heat shield, no parachute, no water, and no notion of a survivable
+entry corridor. `grep -ci` over `index.html` returns zero for `cargo`, `splash`,
+`drogue`, `ablat` and `checkpoint`; `chute`/`parachute` returns **1** — M-06's
+briefing, "No atmosphere, no parachutes" — and `shield` returns 3, all of them
+prose. No mechanism behind any of them.
 
 So this item is three new mechanisms plus a mission that uses them.
 
@@ -141,3 +151,104 @@ Every leg already has its lesson except the last two, which are this item's.
 - The whole mission flown end to end headlessly in a new suite, from dark pad
   to splashdown.
 - All existing suites pass, arrivals unmoved.
+
+---
+
+## What shipped
+
+Decided with the product owner before any code was written, and every number
+below produced by a run rather than an argument.
+
+- **Cargo is mass.** `S.craft.cargo` sits in `craftMass()` beside the
+  propellant, so the solver, the ΔV remaining, the thrust-to-weight and the
+  ascent all feel it without being told about it. `cargoMax` is a per-vehicle
+  `rig()` number. Both default to 0, and `x + 0 === x`, which is why nothing
+  that shipped before moved.
+- **Cargo crosses a hard dock** through the open hatch at 4 kg/s, on the
+  `DOCK XFER` pattern, as a fifth UTILITIES sub-page. No thirteenth function key.
+- **The shield has a budget and a rate**, not a hull temperature: 90 MJ/m² it
+  can absorb and 420 kW/m² it cannot survive for an instant. Those are the two
+  sides of the corridor.
+- **The shallow failure is not a skip.** Drag only ever removes energy, so the
+  orbit after a grazing pass is always lower, never worse. Too shallow means
+  you skim, exit, come round again, and spend shield budget every lap; when it
+  is gone the hull is next. Proven in the suite by measuring six consecutive
+  passes: 384 → 368 → 350 → 332 → 313 → 292 km of apoapsis, monotonic.
+- **Altitude arms a canopy; dynamic pressure tears it away.** q is pinned near
+  1.9 kPa from 30 km to the sea, so a q gate down there could never be broken.
+  The drogue arms below 25 km, the mains below 6 km and tear above 0.80 kPa —
+  which is what makes the drogue compulsory, because on the shield alone the
+  vehicle is still at 1.99 kPa passing 6 km.
+- **Touchdown is judged against the ground where there is air**, against the
+  stars where there is none. Earth's surface moves at 464.6 m/s and the Moon's
+  at 4.62, so this is the only split that lets a capsule splash down without
+  making M-06's lunar landing unflyable. Earth carries `ocean: true` and a
+  10 m/s / 8 m/s splashdown gate; everything else keeps 4 / 3.
+- **Warp is clamped to 10× inside an atmosphere**, on the proximity-ops
+  precedent.
+- **Phases are opt-in.** A mission declares `phases` instead of `obj`; the nine
+  that shipped before declare `obj` and walk exactly the code they always did.
+- **Checkpoints** are a deep copy of `S` minus the mission record, the phase
+  list and themselves. In-memory, offered by `RESTART PHASE`; `RESTART PAD` is
+  the old behaviour unchanged, and both are keys on the MISSION page.
+- **M-10 CARGO RUN** takes id 11, the only free one, at the end of the ladder.
+  M-09 now chains forward to it instead of backwards to M-00.
+
+## Measured, not assumed
+
+The corridor for AURIGA-10 as it comes home (4,981 kg, Cd·A 26 m², from the
+400 km station orbit):
+
+| target periapsis | deorbit ΔV | passes | peak rate | shield spent | outcome |
+|---|---|---|---|---|---|
+| 125 km | 80 m/s | 2 | 319 kW/m² | 90.0 MJ/m² | burned through, then the hull |
+| **118** | 82 | 1 | 320 | 90.0 | survives, with nothing left |
+| **80 (published edge)** | 93 | 1 | 318 | 71.6 | 20% shield left |
+| **20 (mid-band)** | 112 | 1 | 352 | 60.1 | 33% left |
+| **−40 (published edge)** | 130 | 1 | 383 | 54.3 | 40% left |
+| −120 | 155 | 1 | 415 | 49.4 | survives, 99% of the rate limit |
+| −140 | 161 | 1 | 420 | 29.4 | shield fails — too steep |
+
+Published corridor: **−40 to +80 km**, inside true edges of −120 and +118 at
+the flown mass and −80 and +118 at the heaviest plausible return (5,520 kg).
+The same relationship as max Q's 40 kPa design limit against a 56 kPa break-up.
+
+| | |
+|---|---|
+| M-10 flown end to end, dark pad → splashdown | **14 h 46 min** |
+| Power-up by hand | 4 min 14 s |
+| Max Q on M-10's program | **36.5 kPa** against a 40 kPa limit |
+| Parking orbit | **185.1 × 187.8 km, e = 0.0002** at MET 12:15 |
+| Alongside CERES | 2,339 m at MET 10:37:58, 42.0 m/s of RCS left |
+| Cargo swap | 5,756 → 3,956 → 5,156 kg |
+| Deorbit | periapsis 19 km, mid-corridor |
+| Peak heating | **348 kW/m²** of 420; 59.3 MJ/m² of 90 spent, 34% shield left |
+| Drogue / mains | 24.5 km at 2.53 kPa / 5.9 km at 0.36 kPa |
+| Splashdown | **8.11 m/s vertical, 0.00 m/s lateral** against a 10 / 8 gate |
+| Oxygen | 30 crew-hours of 900 used — a 30× margin on the flown profile |
+| Lunar arrival (unchanged) | 708 × 823 km, e = 0.0229 |
+| Mars arrival (unchanged) | 229 × 1080 km, e = 0.1052, MET 344:08:49:17 |
+
+M-02, M-03, M-05, M-08 and M-06-flown-to-touchdown all come out **bit-for-bit
+identical** against `fa7742d` in position, velocity, mass and elapsed time.
+
+## The one thing the ascent needed
+
+M-10's payload is a third of M-00's, so the filed pitch program puts apoapsis
+through 185 km while the vehicle is still at 132 km and doing 3.8 km/s — a
+ballistic arc, not an orbit. Only the two entries above the atmosphere moved,
+26° → 22° at 40 km and 10° → 7° at 130 km. Max Q is unchanged at 36.5 kPa
+because nothing about the turn through the air changed.
+
+The entry body is blunt: Cd·A 26 m², not the 12 m² an ordinary spacecraft
+carries. At 12 m² there is **no surviving corridor at all** — measured, every
+aim point either burns the budget through or overruns the rate.
+
+## Not done
+
+- **Persisting checkpoints across a page reload.** In-memory was the bar; the
+  snapshot is 2.7 kB of plain JSON, so `localStorage` remains cheap to add.
+- **The "too low to inflate" failure is thin.** The canopies are large enough
+  relative to the vehicle that a late deployment still works down to about
+  80 m; at 60 m the arrival is 13.2 m/s and the flight is lost. The failure
+  that actually bites is streaming the mains without the drogue.

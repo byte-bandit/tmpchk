@@ -27,7 +27,7 @@ ok('12 function keys, all page ids', keyed.length === 12 && keyed.every(k => ids
 
 /* ---- every page builds cleanly in every mission state ---- */
 let bad = [];
-for (const m of [1,2,3,4,5,6,7,8,9,0]) {
+for (const m of [1,2,3,4,5,6,7,8,9,0,10,11]) {
   loadMission(m);
   for (const id of ids) {
     const count = G.PAGES[id].count ? G.PAGES[id].count() : 1;
@@ -97,11 +97,13 @@ ok('empty scratchpad prompts rather than failing', /SCRATCHPAD/.test(out().slice
 
 /* ---- messages reach the scratchpad line and the MSG page ---- */
 loadMission(1);
-const n0 = G.MSGS.length;
 G.say('TEST ADVISORY', 'warn');
 ok('message posts to the scratchpad line', G.spMessage && G.spMessage.text === 'TEST ADVISORY',
    G.spMessage ? G.spMessage.sev : 'none');
-ok('and is logged', G.MSGS.length === n0 + 1);
+// The log is capped at 300 and shifts, so counting it is only right while the
+// suite is short. What the check is actually about is that the line landed.
+ok('and is logged', G.MSGS[G.MSGS.length - 1].text === 'TEST ADVISORY',
+   G.MSGS[G.MSGS.length - 1].text);
 G.gotoPage('MSG'); G.renderCDU();
 ok('MSG page shows it newest-first', /TEST ADVISORY/.test(G.CURRENT[0].full.val), G.CURRENT[0].full.val);
 
