@@ -11,7 +11,7 @@ constraints and open questions.
 | [03](03-launch.md) | Launch from Earth | **Done** | — |
 | [04](04-cargo-and-return.md) | Cargo run: launch, deliver, come home | **Done** | 01, 02, 03 |
 | [05](05-mars-round-trip.md) | Mars round trip: refuel, go, get home | **Done** (ends in Earth orbit) | — |
-| [06](06-lunar-landing.md) | Lunar landing from a mothership | Not started | 04 |
+| [06](06-lunar-landing.md) | Lunar landing from a mothership | **Done** | 04 |
 | 07 | Lambert solver, and bringing an interplanetary return down | Not started | 05 |
 
 Decisions taken: attitude is built inside item 01 scoped to docking's needs and
@@ -66,7 +66,7 @@ first two, and FREE FLIGHT now flies all of it.
 | script 8 | CDU page framework, `PAGES`, input, fullscreen, main loop, boot |
 
 Tests boot the real page under a DOM stub (`tests/harness.js`) or drive it in
-Chromium (`tests/browser/`). Twelve suites; `./tests/run.sh` runs the lot.
+Chromium (`tests/browser/`). Fourteen suites; `./tests/run.sh` runs the lot.
 
 ## Constraints that apply to every item
 

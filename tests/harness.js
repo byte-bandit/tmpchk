@@ -37,6 +37,10 @@ const LATE = [
   // item 05: the Kepler convergence guard, the inbound targeter and life support
   'keplerStep', 'KEPLER_TOL', 'CHILDREN', 'trimEncounter', 'o2Rate', 'eclssClosed',
   'ECLSS_OPEN_RATE', 'TRIM_LEAD', 'SYSDEF',
+  // item 06: local gravity, the vehicle swap, the surface and the way home
+  'surfaceG', 'VEHICLE_KEYS', 'stashVehicle', 'wearVehicle', 'stepAway', 'stepSurf',
+  'freshSurf', 'SURF_CYCLE', 'SURF_RATE', 'teiSolve', 'escapeToParent', 'LUNAR_BAND',
+  'LANDER_MASS', 'attError',
 ];
 
 function boot(file = GAME) {

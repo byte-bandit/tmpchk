@@ -27,7 +27,7 @@ ok('12 function keys, all page ids', keyed.length === 12 && keyed.every(k => ids
 
 /* ---- every page builds cleanly in every mission state ---- */
 let bad = [];
-for (const m of [1,2,3,4,5,6,7,8,9,0,10,11]) {
+for (const m of [1,2,3,4,5,6,7,8,9,0,10,11,12,13]) {
   loadMission(m);
   for (const id of ids) {
     const count = G.PAGES[id].count ? G.PAGES[id].count() : 1;

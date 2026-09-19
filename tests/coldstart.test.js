@@ -290,7 +290,7 @@ for (const m of MISSIONS) {
   warmLoads.push([m.code, G.D.load, allUp(), S.craft.crew]);
 }
 ok('the cold-start missions are the ones that ask to be',
-   MISSIONS.filter(m => m.sys).map(m => m.code).sort().join(',') === 'FREE,M-10,M-11',
+   MISSIONS.filter(m => m.sys).map(m => m.code).sort().join(',') === 'FREE,M-10,M-11,M-12',
    MISSIONS.filter(m => m.sys).map(m => m.code).join(',') || 'none');
 ok('every scripted mission still boots with everything running',
    warmLoads.every(w => w[2]), warmLoads.filter(w => !w[2]).map(w => w[0]).join(',') || 'all warm');

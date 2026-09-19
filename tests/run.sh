@@ -4,7 +4,7 @@ set -u
 cd "$(dirname "$0")/.."
 fail=0
 for t in tests/physics.test.js tests/attitude.test.js tests/missions.test.js tests/deep.test.js tests/docking.test.js \
-         tests/coldstart.test.js tests/launch.test.js tests/cargo.test.js tests/mars.test.js tests/cdu.test.js \
+         tests/coldstart.test.js tests/launch.test.js tests/cargo.test.js tests/mars.test.js tests/lunar.test.js tests/cdu.test.js \
          tests/browser/layout.test.js tests/browser/text.test.js tests/browser/fullscreen.test.js; do
   printf '%-36s' "$(basename "$t")"
   if out=$(node "$t" 2>&1); then

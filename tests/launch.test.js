@@ -71,10 +71,18 @@ if (BASE) {
   const a1 = flyM01(BASE), b1 = flyM01(null);
   const dr1 = Math.hypot(a1.r.x - b1.r.x, a1.r.y - b1.r.y);
   const dv1 = Math.hypot(a1.v.x - b1.v.x, a1.v.y - b1.v.y);
-  ok('M-01 flown as briefed is identical to the page before the atmosphere',
-     dr1 === 0 && dv1 === 0 && a1.m === b1.m && a1.done === b1.done,
-     dr1 === 0 && dv1 === 0 ? `bit-for-bit, ${b1.pe.toFixed(1)}×${b1.ap.toFixed(1)} km`
-                            : `${(dr1*1000).toFixed(6)} m, ${(dv1*1000).toFixed(9)} m/s`);
+  // This one is NOT bit-for-bit any more, and that is a deliberate correction
+  // rather than a leak. A vehicle told to burn before it has finished pointing
+  // used to stop dead in space for the whole slew — 46 s and 358 km of a low
+  // orbit — while the clock and every other object kept running. It now coasts
+  // through the turn, as it always should have. M-01 circularises with a burn
+  // commanded off-attitude, so its arc moves by a few kilometres.
+  //
+  // The guard is still real: the flights that do NOT burn off-attitude above
+  // are all still bit-for-bit, so a genuine perturbation would still show.
+  ok('M-01 flown as briefed moves only by the slew-coast correction, and completes',
+     a1.done === b1.done && dr1 < 20 && dv1 < 0.02,
+     `${dr1.toFixed(3)} km, ${(dv1*1000).toFixed(3)} m/s apart, ${b1.pe.toFixed(1)}×${b1.ap.toFixed(1)} km`);
   ok('and it still completes', b1.done && a1.done);
 
   // The deliberate change: left alone, M-01 now has air to fall into. The

@@ -76,10 +76,17 @@ if (BASE) {
     return { status: g.S.status, r: { ...g.S.r }, t: g.S.t, fuel: g.S.craft.fuel, done: !!g.S.completed };
   };
   const a6 = fly6(BASE), b6 = fly6(null);
-  ok('M-06 still lands on the Moon, and lands identically',
-     b6.status === 'landed' && a6.status === b6.status && a6.t === b6.t &&
-     a6.r.x === b6.r.x && a6.r.y === b6.r.y && a6.fuel === b6.fuel && a6.done === b6.done,
-     `${b6.status} at MET ${G.fmtMET(b6.t)}, ${b6.fuel.toFixed(1)} kg left`);
+  // Not bit-for-bit any more, deliberately: a vehicle commanded to burn before
+  // it has finished pointing used to freeze in space for the whole slew, and
+  // now coasts through it. M-06's descent is flown with exactly those commands,
+  // so it lands about three seconds later on a few more kilograms. It still
+  // lands, which is what the mission is, and the missions above that do not
+  // burn off-attitude are still bit-for-bit.
+  ok('M-06 still lands on the Moon, moved only by the slew-coast correction',
+     b6.status === 'landed' && a6.status === b6.status &&
+     Math.abs(a6.t - b6.t) < 30 && Math.abs(a6.fuel - b6.fuel) < 50 && a6.done === b6.done,
+     `${b6.status} at MET ${G.fmtMET(b6.t)} on ${b6.fuel.toFixed(1)} kg `
+     + `(was ${G.fmtMET(a6.t)} on ${a6.fuel.toFixed(1)} kg)`);
 } else {
   ok('baseline page available for an A/B comparison', false, 'git show failed');
 }
@@ -599,15 +606,30 @@ console.log('\nTHE ROSTER');
 ok('M-10 kept the id it took, and M-11 took the next free one',
    G.MISSIONS.filter(m => m.id === 11).length === 1 &&
    G.MISSIONS.find(m => m.id === 12) && G.MISSIONS.find(m => m.id === 12).code === 'M-11' &&
-   G.MISSIONS.map(m => m.id).sort((a, b) => a - b).join(',') === '0,1,2,3,4,5,6,7,8,9,10,11,12',
+   G.MISSIONS.map(m => m.id).sort((a, b) => a - b).join(',') === '0,1,2,3,4,5,6,7,8,9,10,11,12,13',
    G.MISSIONS.map(m => m.id).join(','));
 ok('and no other mission was renumbered',
    G.MISSIONS.find(m => m.id === 10).code === 'M-00' && G.MISSIONS.find(m => m.id === 0).code === 'FREE');
 ok('M-09 now chains forwards to it instead of backwards to the launch tutorial',
    G.MISSIONS.find(m => m.id === 9).next === 11);
 ok('the roster runs the ladder and ends with the sandbox',
-   G.ROSTER_ORDER.join(',') === '10,1,2,3,4,5,6,7,8,9,11,12,0', G.ROSTER_ORDER.join(','));
+   G.ROSTER_ORDER.join(',') === '10,1,2,3,4,5,6,7,8,9,11,12,13,0', G.ROSTER_ORDER.join(','));
 ok('and M-10 chains forwards to the Mars round trip',
    G.MISSIONS.find(m => m.id === 11).next === 12);
+// The chaining papercut, now caught by a rule rather than by a reader: every
+// mission that names a successor must name one that EXISTS and that comes
+// after it in the roster. Three consecutive items shipped a `next` pointing at
+// the sandbox because the item after them had not been written yet.
+{
+  const pos = (id) => G.ROSTER_ORDER.indexOf(id);
+  const bad = G.MISSIONS.filter(m => m.next != null && m.next !== 0)
+    .filter(m => !G.MISSIONS.some(x => x.id === m.next) || pos(m.next) <= pos(m.id));
+  ok('every mission that chains, chains forwards to a mission that exists',
+     bad.length === 0, bad.map(m => m.code + '->' + m.next).join(',') || 'all forward');
+  const last = G.ROSTER_ORDER[G.ROSTER_ORDER.length - 2];   // the sandbox is last
+  ok('and the newest mission is the one that hands over to the sandbox',
+     G.MISSIONS.find(m => m.id === last).next === 0,
+     G.MISSIONS.find(m => m.id === last).code + ' -> ' + G.MISSIONS.find(m => m.id === last).next);
+}
 
 T.done('cargo, entry and phases: all checks passed');

@@ -389,6 +389,10 @@ function airPressure(b, altKm) {
   if (!b.rho0 || !(altKm < b.atmo)) return 0;
   return Math.exp(-Math.max(0, altKm) / b.hScale);
 }
+/** Surface gravity of a body, m/s². What a vehicle standing on it weighs
+ *  against. Earth returns 9.8196 — its own number, not the G0 constant. */
+const surfaceG = (b) => b.mu / (b.R * b.R) * 1000;
+
 const CHILDREN = {};
 for (const k in BODIES) {
   const p = BODIES[k].parent;
@@ -641,6 +645,10 @@ const S = {
   // Ordered missions only. `phases` is null on the flat, unordered kind, which
   // is every mission that shipped before this.
   phases: null, phase: 0, checkpoints: [],
+  // The other vehicle. Null on every mission that flies only one, which is all
+  // of them but M-12. `landed` says the wheels are down on a flight that can
+  // stand back up; `surf` is the work done outside.
+  away: null, landed: false, surf: null,
 };
 
 /* ---- coming home -------------------------------------------------------
@@ -1783,9 +1791,17 @@ function burnStep(dt) {
   // An ascent is the exception: a launch vehicle pitches over THROUGH the
   // burn, so the guidance is always a little ahead of the nose and thrust
   // simply comes out of wherever the nose currently is, as it does in life.
-  if (S.burn && !S.burn.ascent && attError() > ALIGN_TOL) { S.aligning = true; return; }
-  if (S.burn) S.aligning = false;
-  const lit = !!S.burn && S.craft.fuel > 0;
+  //
+  // Note what "the burn clock stops" must NOT mean: the VEHICLE stopping. It
+  // is still in orbit while it turns, and a 180° slew takes 46 s — long enough
+  // to carry it 358 km, 3.1° of phase, in low Earth orbit. Returning here
+  // before the propagation froze the ship in space while the clock, the
+  // station and every other object kept running, which is not a simplification
+  // but a different universe. It coasts through the slew; only the engine, the
+  // propellant and the burn clock wait.
+  const waiting = !!S.burn && !S.burn.ascent && attError() > ALIGN_TOL;
+  if (S.burn) S.aligning = waiting;
+  const lit = !!S.burn && !waiting && S.craft.fuel > 0;
   const dirv = thrustDir();
   const aT = lit ? curThrust() / m : 0;   // km/s^2
   const acc = (rv, vv) => {
@@ -1815,7 +1831,7 @@ function burnStep(dt) {
         : 'MAIN ENGINE CUTOFF — propellant exhausted', 'warn');
     }
   }
-  if (!S.burn) return;              // cutoff above already cleared the burn
+  if (!S.burn || waiting) return;   // cutoff cleared the burn, or the nose is still coming round
   S.burn.left -= dt;
   if (S.burn && S.burn.left <= 1e-9) endBurn('MECO — burn complete', 'ok');
 }
@@ -1862,8 +1878,14 @@ function setPad(body, thetaDeg, opts) {
     held: true, lifted: false, hold: true, T: -(o.count != null ? o.count : COUNT_DEFAULT),
     program: (o.program || PITCH_DEFAULT).map(p => [p[0], p[1]]),
     ignited: false, maxQ: 0, maxQalt: 0, liftT: null, meco: null, site: o.site || 'PAD',
+    // What the ascent this pad files actually costs, for the phasing readout.
+    // Omitted means the filed Earth ascent, measured in tests/launch.test.js,
+    // which is what every pad that shipped before this one flies.
+    ascent: o.ascent || null,
   };
-  S.fairing = true;
+  // A pad on an airless body has no fairing to hide the arrays behind, and a
+  // lander that came down with them deployed does not fold them to go home.
+  S.fairing = o.fairing !== undefined ? o.fairing : true;
   padPlace(0);
 }
 /** Stand the vehicle on the ground and let the planet carry it. */
@@ -1909,9 +1931,19 @@ function ignite() {
     ? `GUIDANCE ALIGNING — ${fmtT(alignLeft())} to go. There is no pitch reference to fly until the platform is aligned.`
     : 'GUIDANCE NOT ALIGNED — the ascent has no attitude reference. Bring GUIDANCE up on the SYS page.';
   if (S.craft.fuel <= 0) return 'No propellant in the lit stage.';
-  const twr = curThrust() * 1000 / (craftMass() * G0);
+  // WHICH GRAVITY. A vehicle lifts off against the weight it has WHERE IT IS
+  // STANDING, and this gate used to weigh every stack at Earth's 9.80665 m/s².
+  // On the Moon that is a factor of six wrong in the direction that refuses
+  // flights which would fly: measured, a 15 kN engine under a 2,560 kg lander —
+  // a lunar thrust-to-weight of 3.62, four times what it needs — was turned
+  // away as "15 kN against 25 kN of vehicle". Every Earth launch that shipped
+  // is unchanged by construction: at the Cape this is 9.8196 m/s² against
+  // 9.80665, a difference of a tenth of a percent on a stack that lifts at 1.73.
+  const gLocal = surfaceG(BODIES[p.body]);
+  const twr = curThrust() * 1000 / (craftMass() * gLocal);
   if (twr <= 1) return `THRUST DOES NOT EXCEED WEIGHT — ${(curThrust()*1000/1000).toFixed(0)} kN against `
-    + `${(craftMass()*G0/1000).toFixed(0)} kN of vehicle. This stack cannot lift off at ${(S.throttle*100).toFixed(0)}% throttle.`;
+    + `${(craftMass()*gLocal/1000).toFixed(0)} kN of vehicle on ${BODIES[p.body].name}. `
+    + `This stack cannot lift off at ${(S.throttle*100).toFixed(0)}% throttle.`;
   p.ignited = true; p.held = false; p.lifted = true; p.liftT = S.t; p.liftTheta = p.theta;
   p.hold = false; p.T = 0;
   S.preBurnWarp = S.warp;
@@ -1983,13 +2015,29 @@ function stepLaunch(dt) {
 const ASCENT_TIME = 515;                 // s, pad to insertion
 const ASCENT_ARC  = 18.0 * Math.PI/180;  // rad of downrange travel in that time
 const PARK_ALT    = 185;                 // km, the orbit the filed program aims at
+/* The window belongs to the PAD, not to Earth. A pad declares what its filed
+   ascent costs in time and downrange arc, and where it inserts; a pad that
+   declares nothing flies the measured Earth ascent above, which is every pad
+   that shipped before the Moon had one. The lunar numbers are the lander's
+   own, measured the same way: 611 s and 23.0° to a 100 km orbit.
+
+   This matters more on the Moon than it ever did at the Cape. At Earth a
+   missed window costs laps of phasing with a big tank behind you; on the Moon
+   the ascent stage has about 220 m/s of RCS and the mothership comes round
+   every 118 minutes. Measured, lifting off on the window is 2.7 hours to a
+   hard dock and 11 kg of propellant; ninety degrees out it is 23.7 hours and
+   33 kg; a hundred and eighty degrees out, it does not close at all.        */
 function launchWindow() {
   const p = S.pad;
   if (!p) return null;
   const o = S.objects.find(x => x.id === 'STATION' && x.soi === p.body);
   if (!o) return null;
   const b = BODIES[p.body], mu = b.mu;
-  const r1 = b.R + PARK_ALT, r2 = V.len(o.r);
+  const asc = p.ascent || null;
+  const park = asc && asc.park != null ? asc.park : PARK_ALT;
+  const aTime = asc && asc.time != null ? asc.time : ASCENT_TIME;
+  const aArc = asc && asc.arc != null ? asc.arc : ASCENT_ARC;
+  const r1 = b.R + park, r2 = V.len(o.r);
   const at = (r1 + r2) / 2;
   const tof = Math.PI * Math.sqrt(at*at*at/mu);          // half the transfer ellipse
   const ws = Math.sqrt(mu/(r2*r2*r2));                   // station's angular rate
@@ -1997,11 +2045,104 @@ function launchWindow() {
   // Where the station has to be, relative to the pad, at the moment of liftoff:
   // the Hohmann phase requirement, plus the arc the ascent itself covers, less
   // what the station travels while the vehicle is climbing.
-  const want = normAngle(Math.PI - ws*tof + ASCENT_ARC - ws*ASCENT_TIME);
+  const want = normAngle(Math.PI - ws*tof + aArc - ws*aTime);
   const lead = normAngle(Math.atan2(o.r.y, o.r.x) - p.theta);
   const rel = ws - wp;
   const wait = rel > 1e-14 ? normAngle(want - lead) / rel : Infinity;
-  return { want, lead, wait, tof, alt: r2 - b.R };
+  return { want, lead, wait, tof, alt: r2 - b.R, park,
+           label: o.label || 'CERES', period: 2*Math.PI/Math.max(rel, 1e-14) };
+}
+
+/* ---- two vehicles, one simulation ---------------------------------------
+   The game flies ONE vehicle. A mission that separates a lander would normally
+   mean two of them — the largest change in the backlog — so it does something
+   cheaper and truer to what the player is doing: the vehicle that is not being
+   flown becomes what station CERES already is, an object carrying a port, and
+   everything it owns is lifted off into a bag.
+
+   What belongs to a VEHICLE rather than to the world is listed once, here.
+   Getting this list wrong is the failure mode the item warned about: a lander
+   that inherited the mothership's battery charge would be invisible and wrong,
+   which is why `tests/lunar.test.js` asserts every one of these moves.        */
+const VEHICLE_KEYS = ['craft', 'sys', 'power', 'therm', 'dock', 'att', 'loads', 'shield',
+                      'chute', 'pad', 'throttle', 'fairing', 'aligning', 'pwrUp',
+                      'landingAllowed', 'manifest', 'thermLimit', 'surf', 'landed'];
+const cloneVal = (x) => x === undefined ? null : JSON.parse(JSON.stringify(x));
+/** Lift everything vehicle-owned out of `S` into plain data. */
+function stashVehicle(label) {
+  const bag = { label };
+  for (const k of VEHICLE_KEYS) bag[k] = cloneVal(S[k]);
+  return bag;
+}
+/** Put a bag back on. The inverse, key for key. */
+function wearVehicle(bag) {
+  for (const k of VEHICLE_KEYS) S[k] = cloneVal(bag[k]);
+}
+
+/* The vehicle that is not being flown is not in stasis. It holds an orbit, it
+   crosses the same shadows, its bus draws the same watts and its crew breathe.
+   Rather than write a second power model that could drift away from the first,
+   this WEARS the other vehicle for one step and takes it off again — one code
+   path, so the ship you left behind is simulated by exactly the code that
+   simulates the one you are flying. */
+function stepAway(dt) {
+  const a = S.away;
+  if (!a || !a.bag) return;
+  const o = S.objects.find(x => x.id === a.id);
+  if (!o) return;
+  const mine = stashVehicle('active');
+  const kr = S.r, kv = S.v, ksoi = S.soi;
+  wearVehicle(a.bag);
+  S.r = { ...o.r }; S.v = { ...o.v }; S.soi = o.soi;
+  S.awayTick = true;
+  derive();
+  // What it is doing out there, kept for the readouts: whether it is in
+  // shadow, what it is generating and what it is drawing. Nothing reads these
+  // to decide anything — the bag itself is the state.
+  a.ecl = D.ecl; a.gen = D.gen; a.load = D.load; a.alt = D.alt;
+  stepSystems(dt);
+  // Crew left aboard a ship whose loop has stopped are on the tank, at the
+  // same rate they would be on the one you are flying.
+  if (S.craft.crew > 0 && S.craft.o2 <= 0 && o2Rate() > 0) a.dead = true;
+  S.awayTick = false;
+  a.bag = stashVehicle(a.bag.label);
+  wearVehicle(mine);
+  S.r = kr; S.v = kv; S.soi = ksoi;
+  derive();
+}
+
+/* ---- work on the surface ------------------------------------------------
+   Short, and in item 01's shape: a procedure with steps that take real time
+   and cost a real consumable. Outside, the crew are on their suits — which is
+   the open loop, at the open loop's rate — so an hour of collecting is an hour
+   off the reserve rather than a free animation.                             */
+const SURF_CYCLE = 300;        // s — depressurise and climb out, or the reverse
+const SURF_RATE  = 0.35;       // kg/s of samples into the hold
+function freshSurf() { return { phase:'INSIDE', t:0, out:0, done:false }; }
+function stepSurf(dt) {
+  const u = S.surf;
+  if (!u || !S.pad || S.pad.lifted) return;
+  if (u.phase === 'PREP' || u.phase === 'BACK') {
+    u.t += dt;
+    if (u.t >= SURF_CYCLE) {
+      u.t = 0;
+      if (u.phase === 'PREP') { u.phase = 'OUT'; say('CREW ON THE SURFACE · suits sealed, hatch open. SURF SAMPLE to start collecting.', 'ok'); }
+      else { u.phase = 'INSIDE'; say(`CREW ABOARD · cabin repressurised, ${u.out.toFixed(0)} kg of samples struck down. The ascent is yours whenever the window is.`, 'ok'); }
+    }
+  }
+  if (u.phase === 'COLLECT') {
+    const want = S.manifest ? S.manifest.collect : 0;
+    const room = Math.max(0, (S.craft.cargoMax || 0) - S.craft.cargo);
+    const take = Math.min(SURF_RATE * dt, Math.max(0, want - u.out), room);
+    S.craft.cargo += take; u.out += take;
+    if (take <= 1e-9) {
+      u.phase = 'OUT'; u.done = u.out > 0;
+      say(`COLLECTION COMPLETE · ${u.out.toFixed(0)} kg aboard. SURF IN to climb back in.`, 'ok');
+    }
+  }
+  // Outside, the loop is behind them and the suits are the tank.
+  if ((u.phase === 'OUT' || u.phase === 'COLLECT') && S.craft.crew > 0)
+    S.craft.o2 = Math.max(0, S.craft.o2 - S.craft.crew * ECLSS_OPEN_RATE * dt / 3600);
 }
 
 /** T−/T+ as a count reads it. */
@@ -2159,9 +2300,12 @@ function advance(dtSim) {
     // Attitude leads thrust; docking follows the world. Contact can only be
     // judged once both vehicles have been moved.
     stepDock(dt);
+    if (S.surf) stepSurf(dt);
     dockAutoStep(dt);
     derive();
     stepSystems(dt);
+    // The ship you are not flying gets the same second you just spent.
+    if (S.away) stepAway(dt);
     if (patchSOI()) { derive(); }
     if (checkHazards()) return;
     fireSchedule();
@@ -2211,6 +2355,12 @@ function checkHazards() {
       say(`CAUTION · OXYGEN RESERVE ${fmtT(hrs*3600)} REMAINING for ${S.craft.crew} crew. Life support is not closing the loop — bring ECLSS up and the reserve stops moving altogether.`, 'warn'); }
     else if (hrs >= 24 && S.o2Warn) S.o2Warn = 0;
   }
+
+  // The ship you left behind can be lost while you are away, and it is lost
+  // for the same reason any ship is: the power stopped and then the air did.
+  if (S.away && S.away.dead)
+    return loseMission(`CREW LOST — ${S.away.label} ran out of air in orbit while you were away. `
+      + `Its loop stopped when its bus did, and nobody was aboard to bring either back.`);
 
   const tl = S.thermLimit || 800;
   if (S.therm.hull > tl*0.8 && !S.warnedTherm) { S.warnedTherm = true; say(`CAUTION · HULL ${S.therm.hull.toFixed(0)} °C — limit is ${tl} °C`, 'warn'); }
@@ -2280,8 +2430,24 @@ function checkHazards() {
     const sea = !!b.ocean;
     const vLim = sea ? 10 : 4, hLim = sea ? 8 : 3;
     if (S.landingAllowed && vv < vLim && hv < hLim) {
-      S.status = 'landed'; S.v = {x:0,y:0};
+      S.v = {x:0,y:0};
       S.r = V.mul(V.unit(S.r), b.R);
+      S.landed = true;
+      // A vehicle that declares an ascent program came down meaning to go back
+      // up, so touchdown builds it a pad where it stopped and the clock keeps
+      // running: the ship in orbit above is still going round, and the window
+      // home is a thing you wait for rather than a thing you are given. Any
+      // other vehicle — which is every one that shipped before this — takes the
+      // status it always took and the simulation stops, bit for bit.
+      if (S.craft.ascent && !b.rho0) {
+        setPad(S.soi, Math.atan2(S.r.y, S.r.x) * 180/Math.PI,
+               { count: S.craft.ascent.count != null ? S.craft.ascent.count : 600,
+                 program: S.craft.ascent.program, ascent: S.craft.ascent,
+                 fairing: false, site: S.craft.ascent.site || 'SURFACE' });
+        S.burn = null; S.sched = null;
+      } else {
+        S.status = 'landed';
+      }
       say(`${sea ? 'SPLASHDOWN' : 'TOUCHDOWN'} on ${b.name} · ${vv.toFixed(2)} m/s vertical, ${hv.toFixed(2)} m/s lateral`
         + (sea ? ` — limits ${vLim} / ${hLim}. Recovery is on its way.` : ''), 'ok');
       checkObjectives(true); return true;
@@ -2369,9 +2535,14 @@ const PX = (kmv) => kmv / view.km;
 function targetRel() {
   if (!S.target) return null;
   if (S.target === 'STATION') {
-    const o = S.objects.find(o => o.id === 'STATION');
+    // A flight can leave one port behind and acquire another — the depot at
+    // Earth, then your own mothership at the Moon. The one in the sphere you
+    // are actually in is the one you are flying to. With a single station, as
+    // in every mission that shipped before this, these are the same object.
+    const o = S.objects.find(o => o.id === 'STATION' && o.soi === S.soi)
+           || S.objects.find(o => o.id === 'STATION');
     if (!o || o.soi !== S.soi) return null;
-    return { r:V.sub(o.r, S.r), v:V.sub(o.v, S.v), name:'STATION', obj:o };
+    return { r:V.sub(o.r, S.r), v:V.sub(o.v, S.v), name: o.label || 'STATION', obj:o };
   }
   if (BODIES[S.target]) {
     const st = bodyStateIn(S.soi, S.target, S.t);
@@ -2579,7 +2750,10 @@ function drawProximity(tgt) {
   cx2.fillStyle = '#F2A33C'; cx2.fill();
   cx2.restore();
   cx2.restore();
-  document.getElementById('scope-tag').textContent = 'PROXIMITY OPS · STATION'
+  // The port you are flying to is not always CERES: on M-12 it is your own
+  // ship. The object carries the name; the geometry does not care.
+  document.getElementById('scope-tag').textContent = 'PROXIMITY OPS · '
+    + ((g && g.obj && g.obj.label) || 'STATION')
     + (g && S.dock.phase !== 'FREE' ? '  ▸ ' + S.dock.phase : g ? `  ▸ ${g.axial.toFixed(1)} m` : '');
   document.getElementById('scope-scale').textContent = `⟷ ${(span/5*1000).toFixed(0)} m/ring`;
 }
@@ -2644,6 +2818,10 @@ const logEl = document.createElement('div');   // detached: the MSG page renders
 const MSGS = [];
 const SEVERITY = { err:'err', warn:'warn', ok:'ok', key:'info', hd:'info', sys:'info', dim:'info', out:'info' };
 function say(text, cls) {
+  // Anything said while the OTHER vehicle is being stepped is said about that
+  // vehicle, and has to arrive labelled — "BUS TRIP" means something very
+  // different when it is the ship you are not aboard.
+  if (S.awayTick) text = `${(S.away && S.away.label) || 'THE OTHER VEHICLE'} · ${text}`;
   const plain = String(text).replace(/\{|\}/g, '');
   MSGS.push({ t: S.t, text: plain, cls: cls || 'out' });
   while (MSGS.length > 300) MSGS.shift();
@@ -2909,7 +3087,11 @@ function exec(raw) {
     setAttMode('INRT', pitchToTheta(pitchCommand(Math.max(0, D.alt))));
     return say(`IGNITION · ${S.craft.stageName || S.craft.name}, guidance on the pitch program.`, 'key');
   }
-  case 'STAGE': case 'SEP': {
+  // SEP used to be a second name for STAGE. It is not any more: dropping a
+  // spent stage and separating a crewed lander are different enough acts that
+  // sharing a word would eventually cost somebody a vehicle. STAGE drops a
+  // stage; SEP lets go of a ship.
+  case 'STAGE': case 'JETT': {
     const bad = jettisonStage();
     return bad ? say(bad, 'err') : undefined;
   }
@@ -2972,6 +3154,8 @@ function exec(raw) {
     return;
   }
   case 'DOCK': case 'PROX': return cmdDock(A);
+  case 'SEP': case 'SEPARATE': return cmdSep(A);
+  case 'SURF': case 'SURFACE': return cmdSurf(A);
   case 'UTIL': case 'UTILITIES': return gotoPage('UTIL');
   case 'ENTRY': case 'EDL': case 'REENTRY': return gotoPage('ENTR');
   case 'CHUTE': case 'CHUTES': {
@@ -3237,6 +3421,110 @@ function coastEncounter(r0, v0, soi0, t0, tk, maxT) {
     }
   }
   return { entered:false, t, miss };
+}
+
+/* ---- leaving a moon for the planet it orbits -----------------------------
+   `PLAN XFER` transfers between two bodies that orbit the same parent, and
+   says so when asked for something else: EARTH does not orbit MOON. But a ship
+   in lunar orbit that wants to go home is not asking for a transfer — it is
+   asking to leave one sphere of influence with its excess velocity pointing
+   the right way, which is a different problem with a different answer.
+
+   Measured, and this is the whole reason the solver exists: from a 100 km
+   lunar orbit a 750 m/s prograde escape leaves a geocentric perigee of 358,830
+   km if you light it at one point in the orbit and 10,477 km if you light it
+   140° later. `PLAN ESC` solves the size and fires at the lunar periapsis,
+   which is an arbitrary point — flown, it throws the ship onto a 344,354 ×
+   1,229,412 km orbit, apogee past Earth's own sphere of influence. WHERE you
+   light it is the whole manoeuvre.                                          */
+
+/** Coast until this state leaves `soi0` for its parent. State in the PARENT
+ *  frame at the crossing, or null if it comes back down or never leaves. */
+function escapeToParent(r0, v0, soi0, t0, maxT) {
+  const b = BODIES[soi0];
+  if (!b.parent) return null;
+  let r = { ...r0 }, v = { ...v0 }, t = t0;
+  for (let n = 0; n < 20000; n++) {
+    if (t - t0 > maxT) return null;
+    const e = elements(r, v, b.mu);
+    const dt = Math.max(5, 0.03 * e.r / Math.max(e.v, 1e-9));
+    const o = propagate(r, v, b.mu, dt);
+    r = o.r; v = o.v; t += dt;
+    if (V.len(r) < b.R) return null;                     // back onto the surface
+    if (V.len(r) > b.soi) {
+      const st = bodyStateInParent(soi0, t);
+      return { r: V.add(r, st.r), v: V.add(v, st.v), t };
+    }
+  }
+  return null;
+}
+
+/** Solve the departure: where in this orbit to light it, and for how long, so
+ *  that the parent-frame periapsis comes out at `aimAlt`. */
+function teiSolve(aimAlt) {
+  const b = soiBody();
+  if (!b.parent) return null;
+  const pb = BODIES[b.parent], goal = pb.R + aimAlt;
+  const e = el();
+  if (!isFinite(e.period) || e.e >= 1) return null;
+  const P = e.period, m0 = craftMass(), flow = curFlow();
+  const durMax = Math.min(S.craft.fuel / Math.max(flow, 1e-9), 4 * P);
+  // A burn centred at `tc`, of `dur` seconds, and what it leaves behind.
+  const trial = (tc, dur) => {
+    if (!(dur > 0) || dur > durMax) return null;
+    const lead = Math.max(0, tc - dur / 2);
+    const st = propagate(S.r, S.v, b.mu, lead);
+    const o = simBurn(st.r, st.v, b.mu, 'PRO', dur, m0);
+    const esc = escapeToParent(o.r, o.v, S.soi, S.t + lead + dur, 40 * 86400);
+    if (!esc) return null;
+    const pe = elements(esc.r, esc.v, pb.mu);
+    return { rp: pe.rp, ra: pe.ra, ecc: pe.e, tExit: esc.t, dur, tc };
+  };
+  // Size a burn that escapes at all, then a little more: the excess velocity is
+  // what steers, and with none of it every burn point lands in the same place.
+  const vEsc = Math.sqrt(2 * b.mu / e.r);
+  const dEsc = burnTimeFor(Math.max(1, (vEsc - e.v) * 1000));
+  const dScan = Math.min(durMax, dEsc * 1.25);
+  // 1. where in the orbit. One lap, coarsely, then tighten around the best.
+  let best = null;
+  const N = 24;
+  for (let i = 0; i < N; i++) {
+    const tc = P * i / N;
+    const r = trial(tc, dScan);
+    if (!r) continue;
+    if (!best || Math.abs(r.rp - goal) < Math.abs(best.rp - goal)) best = r;
+  }
+  if (!best) return null;
+  let span = P / N;
+  for (let k = 0; k < 8; k++) {
+    for (const tc of [best.tc - span, best.tc + span]) {
+      if (tc < 0) continue;
+      const r = trial(tc, dScan);
+      if (r && Math.abs(r.rp - goal) < Math.abs(best.rp - goal)) best = r;
+    }
+    span /= 2;
+  }
+  // 2. how long, at that point. Perigee falls monotonically with burn time.
+  let lo = dEsc * 0.85, hi = durMax, sol = null;
+  const rpOf = (d) => { const r = trial(best.tc, d); return r ? r.rp : NaN; };
+  let rlo = rpOf(lo), rhi = rpOf(hi);
+  if (!isFinite(rlo) || !isFinite(rhi) || (rlo - goal) * (rhi - goal) > 0) {
+    // No bracket: hand back the best point found rather than nothing, so the
+    // page can say how far off it is instead of pretending there is no answer.
+    sol = best;
+  } else {
+    for (let k = 0; k < 22; k++) {
+      const mid = (lo + hi) / 2, rm = rpOf(mid);
+      if (!isFinite(rm)) break;
+      if ((rlo - goal) * (rm - goal) <= 0) { hi = mid; rhi = rm; } else { lo = mid; rlo = rm; }
+    }
+    sol = trial(best.tc, (lo + hi) / 2) || best;
+  }
+  if (!sol) return null;
+  sol.dv = sol.dur * curThrust() * 1000 / m0;
+  sol.aim = goal - pb.R;
+  sol.parent = b.parent;
+  return sol;
 }
 
 /**
@@ -3618,6 +3906,40 @@ function cmdPlan(A) {
     return;
   }
 
+  if (sub === 'TEI' || sub === 'HOME') {
+    if (!b.parent) return say(`${b.name} has no parent body to fall back to.`, 'err');
+    const pb = BODIES[b.parent];
+    if (e.e >= 1) return say('Already on an escape trajectory — you are leaving whatever happens.', 'err');
+    const aim = parseFloat(A[1]);
+    const aimAlt = isFinite(aim) ? aim : 300;
+    S.planName = 'INJECTION TO ' + pb.name;
+    S.planDetail = `${pb.name} perigee → ${fmtDist(aimAlt)}`;
+    head('MANEUVER · INJECTION TO ' + pb.name);
+    row('FROM', `${fmtDist(e.rp - b.R)} × ${fmtDist(e.ra - b.R)} around ${b.name}`);
+    row('AIM POINT', fmtDist(aimAlt) + ` perigee at ${pb.name}`, 'key');
+    say('Searching the orbit for the departure point…', 'dim');
+    const sol = teiSolve(aimAlt);
+    if (!sol) return say(`No departure from this orbit reaches ${pb.name}. Circularise, or check the tank.`, 'err');
+    const missed = Math.abs(sol.rp - pb.R - aimAlt) > Math.max(400, aimAlt);
+    row('ARRIVES AT', fmtDist(sol.rp - pb.R) + ` perigee`, missed ? 'bad' : 'ok');
+    row('ΔV REQUIRED', fmtDV(sol.dv) + '  PROGRADE', sol.dv <= dvRemaining() ? 'key' : 'bad');
+    row('BURN TIME', sol.dur.toFixed(2) + ' s at full throttle');
+    row('IGNITION', `T−${fmtT(Math.max(0, sol.tc - sol.dur/2))}`);
+    row('LEAVES SOI', fmtT(sol.tExit - S.t) + ' after that');
+    if (sol.dv > dvRemaining()) say('INSUFFICIENT PROPELLANT for this injection.', 'err');
+    say('');
+    S.solution = { name: S.planName, dir: 'PRO', secs: sol.dur, node: 'T',
+                   when: S.t + sol.tc, nodeLabel: `T+${sol.tc.toFixed(0)} s`,
+                   dv: sol.dv, prop: sol.dur * curFlow(),
+                   detail: `${pb.name} perigee ${fmtDist(sol.rp - pb.R)}` };
+    say(`  →  BURN PRO ${sol.dur.toFixed(2)} AT T+${sol.tc.toFixed(2)}`, 'ok');
+    if (missed)
+      say(`Closest this orbit gets is ${fmtDist(sol.rp - pb.R)}. Fly it and trim, or circularise first.`, 'warn');
+    say(`WHERE this is lit is the manoeuvre, not how long: the same burn a fifth of an orbit later `
+      + `leaves a perigee tens of thousands of kilometres out. Fire it on the clock above or solve it again.`, 'dim');
+    return;
+  }
+
   if (sub === 'TRIM' || sub === 'MCC') {
     const tk = A[1];
     if (!tk || !BODIES[tk]) return say('Usage: PLAN TRIM <BODY> [aim altitude, km]   e.g. PLAN TRIM EARTH', 'err');
@@ -3663,12 +3985,12 @@ function cmdPlan(A) {
     const o = S.objects.find(x => x.id === 'STATION' && x.soi === S.soi);
     if (!o) return say('No station to rendezvous with here.', 'err');
     const se = elements(o.r, o.v, mu);
-    head('RENDEZVOUS SOLUTION · STATION');
+    head('RENDEZVOUS SOLUTION · ' + (o.label || 'STATION'));
     row('YOUR ORBIT', `${fmtDist(e.rp-b.R)} × ${fmtDist(e.ra-b.R)}   T ${fmtT(e.period)}`);
-    row('STATION ORBIT', `${fmtDist(se.rp-b.R)} × ${fmtDist(se.ra-b.R)}   T ${fmtT(se.period)}`);
+    row((o.label || 'STATION') + ' ORBIT', `${fmtDist(se.rp-b.R)} × ${fmtDist(se.ra-b.R)}   T ${fmtT(se.period)}`);
     const thC = Math.atan2(S.r.y, S.r.x), thT = Math.atan2(o.r.y, o.r.x);
     const phi = normAngle((thT - thC) * e.dir);
-    row('PHASE ANGLE', (phi*180/Math.PI).toFixed(1) + '°  station ahead of you');
+    row('PHASE ANGLE', (phi*180/Math.PI).toFixed(1) + '°  ' + (o.label ? o.label + ' ahead of you' : 'station ahead of you'));
     row('RANGE', fmtDist(V.len(V.sub(o.r, S.r))));
     row('CLOSING', fmtVel(-V.dot(V.unit(V.sub(o.r,S.r)), V.sub(o.v,S.v))));
 
@@ -3792,6 +4114,114 @@ function cmdTrans(A) {
    Every step below is one key with one precondition and one thing you can
    watch happen. The order is the real order: you cannot open a hatch onto
    vacuum, and the transfer pumps run off the station's bus.               */
+/* ---- the surface --------------------------------------------------------
+   Three steps and a readout. It exists so that landing somewhere means having
+   been there. */
+function cmdSurf(A) {
+  const s = A[0] || '';
+  const no = (m) => say(m, 'err');
+  if (!s) return gotoPage('SURF');
+  if (!S.landed || !S.pad || S.pad.lifted) return no('Not on the surface.');
+  if (!S.surf) S.surf = freshSurf();
+  const u = S.surf;
+  switch (s) {
+  case 'EVA': case 'OUT': {
+    if (u.phase !== 'INSIDE') return no(`Already ${u.phase === 'PREP' ? 'depressurising' : 'outside'}.`);
+    if (S.craft.crew <= 0) return no('Nobody aboard to go out.');
+    u.phase = 'PREP'; u.t = 0;
+    return say(`DEPRESSURISING · ${fmtT(SURF_CYCLE)} to vacuum and out of the hatch. `
+      + `Outside, the crew are on their suits and the reserve moves at ${ECLSS_OPEN_RATE}× their own rate.`, 'key');
+  }
+  case 'SAMPLE': case 'COLLECT': {
+    if (u.phase === 'COLLECT') { u.phase = 'OUT'; return say(`COLLECTION PAUSED · ${u.out.toFixed(0)} kg aboard.`, 'key'); }
+    if (u.phase !== 'OUT') return no('The crew are not outside yet. SURF EVA first.');
+    const want = S.manifest ? S.manifest.collect : 0;
+    if (u.out >= want - 1e-9) return say('NOTHING LEFT ON THE MANIFEST · SURF IN when you are ready.', 'sys');
+    u.phase = 'COLLECT';
+    return say(`COLLECTING · ${SURF_RATE} kg/s into the hold, ${(want - u.out).toFixed(0)} kg to go. `
+      + `Every kilogram is mass the ascent has to lift.`, 'ok');
+  }
+  case 'IN': case 'BACK': {
+    if (u.phase === 'INSIDE') return no('The crew are already aboard.');
+    if (u.phase === 'PREP') return no('Still depressurising.');
+    u.phase = 'BACK'; u.t = 0;
+    return say(`CLIMBING BACK IN · ${fmtT(SURF_CYCLE)} to hatch closed and cabin repressurised.`, 'key');
+  }
+  }
+  return no('SURF takes EVA, SAMPLE or IN.');
+}
+
+/* ---- separation ---------------------------------------------------------
+   Undocking is leaving something you visited. SEPARATION is leaving part of
+   yourself behind, and what is left behind is a ship with your crew aboard.
+
+   Mechanically the mothership becomes what CERES already is — an object in an
+   orbit carrying a port — and everything that made it a vehicle is lifted into
+   a bag that keeps running. The player flies the lander. Item 01's corridor,
+   capture envelope, ring, latches and utilities all apply unchanged, which is
+   the whole point of doing it this way.                                     */
+function cmdSep(A) {
+  const m = S.mission;
+  const spec = m && m.lander;
+  if (!spec) return say('This vehicle carries no lander to separate.', 'err');
+  if (S.away) return say(`Already separated. ${S.away.label} is holding orbit ahead of you — TGT STATION and DOCK to go back aboard.`, 'err');
+  if (S.dock.phase !== 'FREE') return say('Still mated to the station — release the latches before separating.', 'err');
+  if (S.pad && !S.pad.lifted) return say('On the pad. The lander comes off in orbit, not on the ground.', 'err');
+  if (S.burn || S.sched) return say('Not with a burn running or armed. CANCEL first.', 'err');
+  if (spec.soi && S.soi !== spec.soi)
+    return say(`The lander separates in orbit of ${spec.soi}, not here.`, 'err');
+  if (!sysOn('GNC')) return say('GUIDANCE NOT ALIGNED — neither vehicle has an attitude reference. Bring GUIDANCE up first.', 'err');
+
+  const label = S.craft.name;
+  const bag = stashVehicle(label);
+  // The crew split. Whoever goes down is no longer breathing up here.
+  bag.craft.crew = Math.max(0, (bag.craft.crew || 0) - (spec.craft.crew || 0));
+  // And the lander stops being mass the mothership is carrying. Whatever it
+  // weighs on its own is exactly what comes out of the hold.
+  const lc = spec.craft;
+  const landerMass = (lc.stages || []).reduce((a, st) => a + st.dry + st.fuel, 0)
+                   + lc.dry + (lc.fuel || 0) + (lc.rcs || 0);
+  bag.craft.cargo = Math.max(0, (bag.craft.cargo || 0) - landerMass);
+  const o = { id:'STATION', soi:S.soi, r:{ ...S.r }, v:{ ...S.v }, label };
+  S.objects = S.objects.filter(x => !(x.id === 'STATION' && x.soi === S.soi)).concat([o]);
+  S.away = { id:'STATION', label, bag, dead:false, t0:S.t };
+
+  // Now wear the lander. Every field the bag holds is replaced, not merged:
+  // a lander that inherited the mothership's battery charge would be wrong in
+  // a way nobody could see.
+  const hull = S.therm.hull;
+  rig(spec.craft);
+  S.power = { batt: spec.power.batt, battMax: spec.power.battMax, area: spec.power.area,
+              eff: spec.power.eff != null ? spec.power.eff : 0.29, load: 0, gen: 0, tie: 0, ecl: false };
+  S.therm = { hull };                       // it has been sitting in the same sunlight
+  S.loads = { HEAT:true, SCI:false, COMM:true };
+  S.dock = freshDock();
+  S.shield = freshShield(); S.chute = freshChutes();
+  S.throttle = 1; S.pad = null; S.fairing = false;
+  S.manifest = spec.manifest ? { ...spec.manifest } : null;
+  S.landingAllowed = true; S.landed = false; S.surf = null;
+  S.thermLimit = spec.thermLimit || 800;
+  sysBoot();                                 // it has been live on the mothership's bus
+  S.att = { theta: 0, rate: 0, mode: 'PAXS', inertial: 0, slewing: false };
+
+  // Placed exactly where a docked vehicle sits, and pushed off on springs —
+  // the same 0.10 m/s an undocking gets, so the first thing the player sees is
+  // a corridor they already know how to fly.
+  const stTheta = Math.atan2(o.v.y, o.v.x);
+  const axis = { x: Math.cos(stTheta + Math.PI), y: Math.sin(stTheta + Math.PI) };
+  S.att.theta = normAngle(stTheta);
+  const nose = { x: Math.cos(S.att.theta), y: Math.sin(S.att.theta) };
+  S.r = V.sub(V.add(o.r, V.mul(axis, PORT_ARM_STN)), V.mul(nose, PORT_ARM));
+  S.v = V.add(o.v, V.mul(axis, 0.10/1000));
+  S.target = 'STATION';
+  derive();
+  say(`SEPARATION · ${S.craft.name} is away on springs at 0.10 m/s, ${spec.craft.crew} aboard. `
+    + `${label} is now a docking target holding ${fmtDist(D.perAlt)} × ${fmtDist(D.apoAlt)} with `
+    + `${bag.craft.crew} aboard — it keeps breathing and drawing power while you are gone.`, 'key');
+  row('YOUR VEHICLE', `${S.craft.name}   ${fmtDV(dvRemaining())}   RCS ${fmtDV(rcsDV())}`, 'ok');
+  checkObjectives();
+}
+
 function cmdDock(A) {
   const dk = S.dock, s = A[0] || '';
   const g = dockGeom();
@@ -3871,6 +4301,33 @@ function cmdDock(A) {
     dk.misalign0 = 0; dk.misalign = 0;
     dk.vest = { valve:false, press:0, check:-1, decay:0, leak:0, verdict:null, leakOk:false, hatch:false };
     return say('INTERFACE RE-SEATING · latches released, vestibule vented to vacuum, ring driving home again. Close the latches when it is home, then equalise and re-check.', 'key');
+  }
+
+  /* --- going back aboard the ship you left --------------------------------
+     The mirror of SEP, and the moment control comes back. Everything the
+     lander is carrying crosses with the crew; the lander itself does not. An
+     ascent stage is left where Apollo left its own. */
+  case 'CREW': case 'BOARD': {
+    if (!S.away) return no('Nothing to go back aboard — this is the only vehicle in the scenario.');
+    if (dk.phase !== 'HARD') return no('Hard dock required before the crew can cross.');
+    if (!dk.vest.hatch) return no('The crew go through the hatch — open it first.');
+    const o = dockTarget();
+    if (!o) return no('No interface.');
+    const lander = S.craft.name, crew = S.craft.crew || 0, load = S.craft.cargo || 0;
+    const bag = S.away.bag, label = S.away.label;
+    wearVehicle(bag);
+    S.r = { ...o.r }; S.v = { ...o.v }; S.soi = o.soi;
+    S.craft.crew = (S.craft.crew || 0) + crew;
+    S.craft.cargo = (S.craft.cargo || 0) + load;
+    S.objects = S.objects.filter(x => x !== o);
+    S.away = null; S.target = null;
+    S.burn = null; S.sched = null;
+    derive();
+    say(`CREW ABOARD ${label} · ${crew} across through the vestibule with ${load.toFixed(0)} kg of samples. `
+      + `${lander} is released — an ascent stage has nowhere else to be. You have the ship again: `
+      + `${fmtDV(dvRemaining())} in the tank, ${S.craft.crew} aboard.`, 'ok');
+    checkObjectives();
+    return;
   }
 
   case 'HATCH': {
@@ -4349,7 +4806,7 @@ const MISSIONS = [
     'An interplanetary arrival is {11 km/s} at the interface and no heat shield aboard survives that, so this flight does not come down. You arrive on a {hyperbola} and you stop: one hard {retrograde burn at periapsis}, enough to close it into an ellipse. Circularising out where you arrive costs more than the tank holds.',
     'The mission ends {in orbit}. Bringing this crew through the atmosphere is a later flight and a harder problem than it looks — the arc a flyby leaves you on is nothing like the circular one the transfer solver assumes.',
     'Three crew, {three and a half to four years}. The {regenerative} life support recycles the air and runs on the bus — the oxygen reserve is only there for when the power is not.'],
-  hint:'BATT → PWR UP → LAUNCH → COUNT GO', next:0,
+  hint:'BATT → PWR UP → LAUNCH → COUNT GO', next:13,
   sys: [],
   setup(){ rig({name:'ARES-2', dry:5200, fuel:600, fuelMax:32000,
                 thrust:250, isp:900, rcs:260, rcsIsp:220,
@@ -4413,7 +4870,130 @@ const MISSIONS = [
       check:(s,d)=> s.soi === 'EARTH' && d.e.e < 1 && d.perAlt > 100 && d.apoAlt < 20000 },
   ]
 },
+{
+  /* The longest arc in the game and the only one that flies two vehicles. It
+     is assembled almost entirely out of machinery that already shipped — the
+     cold start, the launcher, the depot, the transfer solver, item 01's
+     docking, item 04's corridor and canopies — and adds exactly one idea: the
+     ship you are not flying becomes a port in an orbit, and keeps living.
+
+     The propellant is NUCLEAR because the ladder demands it. Measured leg by
+     leg: TLI 3,145 + lunar capture and descent to a 100 km orbit 964 + the
+     injection home 790 + Earth capture 2,705 + deorbit 54 = 7,658 m/s on the
+     mothership alone, with a 7.9 t lander carried through the first two. At
+     isp 315 that is a 51 t tank on a 3 t ship — a mass fraction of 0.944, past
+     anything ever built. At 900 it is 13 t on a 4.2 t ship, and it closes with
+     1.7 km/s in hand.                                                        */
+  id:13, code:'M-12', name:'TRANQUILLITY RUN',
+  brief:[
+    'Cold and dark at {Cape Auriga} with a {nuclear} stage under the capsule, a {lunar lander} in the hold, and {2,000 kg} of hydrogen aboard. The lander weighs almost four times what your propellant does — you are launching a ship that cannot yet go anywhere.',
+    'Depot {CERES} at {400 km} holds the rest. Dock, tie the bus, pump, and leave with a full tank: {13,000 kg} is what the whole flight is flown on, and every kilogram of it was already in orbit before you were.',
+    'Then the Moon. {PLAN XFER MOON}, capture, and work your way down to a {100 km} orbit. That is where you leave the ship.',
+    '{SEP} hands you the lander and turns the mothership into what CERES was — a port in an orbit, with one of your crew aboard, breathing and drawing power the whole time you are away. It is not in stasis and it can be lost.',
+    'Land. Work outside: {SURF EVA}, {SURF SAMPLE}, {SURF IN}. Then {STAGE} to leave the descent stage on the surface and fly the ascent — and here is the part nothing else in this game does: an ascent to a rendezvous punishes a bad launch {time}, not a bad burn. The {LAUNCH} page carries the window. Lift off on it and the rendezvous is twenty minutes of work; lift off {ninety degrees} out and it is a day of chasing.',
+    'Re-dock, {DOCK CREW} to bring everyone and the samples back across, then {PLAN TEI} for the way home — where in the lunar orbit you light it matters far more than how long you burn.',
+    'You arrive at Earth at {10.5 km/s} and no shield survives that: measured, every aim point either takes the ablator off at {three times} its rate limit or skims and burns the whole budget on the way past. So you {stop first} — {PLAN APO 400} at perigee, about {3.0 km/s}, which is what the last of the depot is for.',
+    'From that low orbit it is M-10\'s entry, flown by a heavier ship: the corridor published on the {ENTRY} page is this airframe\'s own, {−20 to +80 km}, measured the way item 04 measured its first one. Then {DROGUE} below 25 km, {MAINS} below 6, and under 10 m/s into the water.'],
+  hint:'BATT → PWR UP → LAUNCH → COUNT GO', next:0,
+  sys: [],
+  setup(){ rig({name:'SELENE-3', dry:4200, fuel:2000, fuelMax:13000,
+                thrust:250, isp:900, rcs:600, rcsIsp:220,
+                crew:3, o2:2400, cargo:LANDER_MASS, cargoMax:LANDER_MASS + 400,
+                cda:26, stages: ASCENT_STACK()});
+    setPad('EARTH', 0, { count: 600, program: [[0,90],[2,84],[10,58],[40,22],[130,7]] });
+    S.objects = [ makeStation('EARTH', 400, 25) ];
+    S.depot = { name:'CERES', prop: 14000, rate: 12 };
+    // This vehicle is built to come home, so it carries the landing mode from
+    // the start exactly as M-10 and M-11 do. It matters more here than there:
+    // landing mode belongs to the VEHICLE, so it goes into the bag at
+    // separation and comes back out of it at the re-dock — and a mothership
+    // that was never armed would be scored as an impact at 8 m/s under a full
+    // canopy. Measured, before it was set.
+    S.landingAllowed = true;
+    S.shield.fitted = true; S.shield.band = [LUNAR_BAND[0], LUNAR_BAND[1]];
+    S.power.battMax = 3200; S.power.batt = 1200; S.power.area = 70; },
+  // The lander, and everything that makes it a vehicle rather than a number.
+  // It is carried in the hold as mass until SEP, which is when this becomes a
+  // ship and stops being cargo.
+  lander: {
+    soi: 'MOON',
+    manifest: { deliver: 0, collect: 300 },
+    // 2,000 Wh, not 900. Measured: a lander sitting on the surface draws 340 W
+    // and the surface it sits on may be in the dark — the window comes round
+    // every 118 minutes, so a crew that misses one waits two hours with the
+    // arrays making nothing. 900 Wh is 2.6 hours of that and it died on the
+    // pad in a headless flight; 2,000 is nearly six, which covers two windows
+    // and the ten-minute count with room to spare. Lunar NIGHT is 13.7 days
+    // and no battery covers that: land in daylight or do not land.
+    power: { batt: 2000, battMax: 2000, area: 14 },
+    craft: { name:'EAGLE-12', dry:1200, fuel:1600, thrust:15, isp:311,
+             rcs:180, rcsIsp:220, crew:2, o2:300, cargoMax:400, cda:12,
+             // What the descent stage is: a stage, dropped on the surface by
+             // the same key that drops a first stage. It is 4 t of propellant
+             // that never has to be lifted off the Moon again.
+             stages: [ { name:'DESCENT STAGE', dry:900, fuel:4000, thrust:45, isp:311, cda:12 } ],
+             // The filed lunar ascent: pitched over hard and early, because
+             // there is no air to climb out of and every second spent vertical
+             // is a second of gravity paid for nothing. Measured for THIS
+             // vehicle — 100.3 × 111.3 km, 1,875 m/s, 611 s and 23.0° of arc.
+             ascent: { count: 600, program: [[0,90],[0.5,45],[2,20],[8,8],[20,2]],
+                       time: 611, arc: 23.0 * Math.PI/180, park: 100, site: 'TRANQUILLITY' } },
+  },
+  phases:[
+    { name:'POWER UP', text:'Bring every system up. The battery is the only power there is until the fairing goes.',
+      hint:'BATT → BUS → AVIO → ATT → GNC, or PWR UP',
+      check:()=> SYSIDS.every(id => !sysFitted(id) || sysOn(id)) },
+    { name:'LIFT OFF', text:'Release the count and fly the pitch program out of the atmosphere.',
+      hint:'COUNT GO → STAGE when the first stage is dry',
+      check:(s,d)=> d.alt > 140 },
+    { name:'PARKING ORBIT', text:'Shut down at 185 km apoapsis, coast up and circularise.',
+      hint:'MECO at 185 km apoapsis → PLAN CIRC AP',
+      check:(s,d)=> d.e.e < 0.02 && d.perAlt > 150 },
+    { name:'RENDEZVOUS', text:'Phase up to CERES at 400 km and close to inside 30 km.',
+      hint:'TGT STATION → PLAN RDV → PLAN CIRC AP',
+      check:()=>{ const t = targetRel(); return !!t && V.len(t.r) < 30; } },
+    { name:'DOCK AND FUEL', text:'Capture, latch, prove the seal, tie the bus and fill the tank.',
+      hint:'DOCK AUTO → RETRACT → LATCH → EQUALISE → LEAK → UMB → TIE → LINE → XFER',
+      check:(s)=> s.dock.phase === 'HARD' && s.craft.fuel > s.craft.fuelMax * 0.9 },
+    { name:'TRANSLUNAR INJECTION', text:'Undock, back clear, and take the transfer to the Moon.',
+      hint:'DOCK UNDOCK → PLAN XFER MOON',
+      check:(s)=> s.soi === 'MOON' },
+    { name:'LUNAR ORBIT', text:'Capture, then work down to a near-circular 100 km orbit — that is where the lander comes off.',
+      hint:'PLAN CIRC PE → PLAN PERI 100 → PLAN CIRC PE',
+      check:(s,d)=> s.soi === 'MOON' && d.e.e < 0.03 && d.perAlt > 60 && d.apoAlt < 160 },
+    { name:'SEPARATION', text:'Hand the lander the flight. The mothership becomes a docking target with one of your crew aboard.',
+      hint:'SEP',
+      check:(s)=> !!s.away },
+    { name:'DESCENT', text:'Drop periapsis, kill 1.7 km/s of horizontal speed and set it down under 4 m/s vertical and 3 lateral.',
+      hint:'PLAN PERI 15 → BURN RET at periapsis → hold retrograde',
+      check:(s)=> s.landed === true },
+    { name:'SURFACE', text:'Out of the hatch, collect what you came for, and back in.',
+      hint:'SURF EVA → SURF SAMPLE → SURF IN',
+      check:(s)=> !!s.surf && s.surf.done && s.surf.phase === 'INSIDE' },
+    { name:'ASCENT', text:'Drop the descent stage and fly the window. Lift off at the wrong moment and the mothership is over the horizon.',
+      hint:'STAGE → LAUNCH for the window → COUNT GO → MECO at 100 km apoapsis → PLAN CIRC AP',
+      check:(s,d)=> !!s.away && !!s.pad && s.pad.lifted && d.perAlt > 30 && d.e.e < 0.05 },
+    { name:'RE-DOCK', text:'Phase to the mothership, fly the corridor, and bring the crew and the samples back across.',
+      hint:'PLAN RDV → DOCK AUTO → RETRACT → LATCH → EQUALISE → LEAK → HATCH → DOCK CREW',
+      check:(s)=> !s.away && s.craft.name === 'SELENE-3' && (s.craft.cargo || 0) > 0 },
+    { name:'INJECTION HOME', text:'Leave lunar orbit on the point in it that puts your perigee at Earth, not past it.',
+      hint:'PLAN TEI → fly the solution',
+      check:(s,d)=> s.soi === 'EARTH' && d.perAlt < 2000 },
+    { name:'EARTH CAPTURE', text:'You are falling past your own planet at 10.5 km/s and no shield survives that — measured, every aim point either fails the rate limit or burns the budget. Stop in a LOW orbit first: one hard retrograde burn at perigee.',
+      hint:'PLAN APO 400 at perigee — about 3.0 km/s',
+      check:(s,d)=> s.soi === 'EARTH' && d.e.e < 1 && d.apoAlt < 800 && d.perAlt > 140 },
+    { name:'ENTRY', text:'Now it is M-10\'s entry. Put periapsis in the corridor and hold the shield forward.',
+      hint:'PLAN PERI <km> inside the band → ENTRY to check it',
+      check:(s,d)=> d.alt < 25 && s.soi === 'EARTH' && !s.shield.gone },
+    { name:'SPLASHDOWN', text:'Drogue below 25 km, mains below 6 km, and under 10 m/s into the water.',
+      hint:'DROGUE → MAINS',
+      check:(s)=> s.status === 'landed' },
+  ]
+},
 ];
+/* What the lander weighs all up, and therefore what the mothership carries in
+   the hold until it lets go. Declared once so the two can never disagree. */
+const LANDER_MASS = 900 + 4000 + 1200 + 1600 + 180;
 /* The entry corridor published for AURIGA-10, in kilometres of periapsis.
    Measured on this airframe against the 90 MJ/m² budget and the 420 kW/m² rate
    limit, not carried over from another vehicle: a heavier ship penetrates
@@ -4423,10 +5003,15 @@ const CARGO_BAND = [-40, 80];
    limits. It is a different airframe at a different mass and the number is not
    assumed to carry over — that is the rule item 04 set, applied again. */
 const MARS_BAND = [-40, 80];
+/* And SELENE-3's, measured on the airframe that actually comes home from the
+   Moon — a heavier capsule than AURIGA-10 entering from a higher orbit. The
+   rule item 04 set is that a band belongs to one vehicle; this is that rule
+   applied a third time rather than a number copied down. */
+const LUNAR_BAND = [-20, 80];
 /* The roster reads as a ladder, and launch comes before insertion. Ids are not
    renumbered to say so — they are saved in the flight record and every suite
    calls them by number — so the order is stated here instead. */
-const ROSTER_ORDER = [10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 0];
+const ROSTER_ORDER = [10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 0];
 const rosterList = () => ROSTER_ORDER.map(id => MISSIONS.find(m => m.id === id)).filter(Boolean);
 
 function loadMission(id) {
@@ -4450,6 +5035,7 @@ function loadMission(id) {
   S.throttle = 1; S.pad = null; S.fairing = false;
   S.shield = freshShield(); S.chute = freshChutes();
   S.manifest = null; S.phases = null; S.phase = 0; S.checkpoints = [];
+  S.away = null; S.awayTick = false; S.landed = false; S.surf = null;
   m.setup();
   // A mission declares `phases` INSTEAD of `obj` when it wants them ordered.
   // Everything that shipped before declares `obj` and never reaches this.
@@ -5352,14 +5938,16 @@ LNCH: { count: () => 3, title: (i) => i === 1 ? 'PITCH PROGRAM' : i === 2 ? 'LAU
     if (pg === 2) {
       const w = launchWindow();
       return [
-        { l: F('Target', w ? 'CERES · ' + fmtDist(w.alt) : 'NO STATION', w ? 'ok' : 'dim'),
+        { l: F('Target', w ? w.label + ' · ' + fmtDist(w.alt) : 'NO STATION', w ? 'ok' : 'dim'),
           r: F('Phase now', w ? (w.lead*180/Math.PI).toFixed(1) + '°' : '——') },
         { l: F('Phase wanted', w ? (w.want*180/Math.PI).toFixed(1) + '° at liftoff' : '——', 'key'),
           r: F('Window in', w ? (p.lifted ? '——' : fmtT(w.wait)) : '——', w && w.wait < 120 ? 'ok' : '') },
         { full: F('', w
-            ? 'There is no plane to match in this world, only a time. Lift off when the station is that far ahead and you arrive at its altitude just as it gets there; lift off at random and you spend the difference chasing it round the planet.'
+            ? 'There is no plane to match in this world, only a time. Lift off when it is that far ahead and you arrive at its altitude just as it gets there; lift off at random and you spend the difference chasing it round.'
+              + (S.pad && S.pad.ascent ? ' Out here that difference is propellant you do not have: on the window this rendezvous is hours, badly out it does not close.' : '')
             : 'Nothing to phase with from here.', 'body'), wrap: true },
-        { l: F('Ascent allowance', fmtT(ASCENT_TIME)), r: F('Transfer after insert', w ? fmtT(w.tof) : '——') },
+        { l: F('Ascent allowance', fmtT(S.pad && S.pad.ascent && S.pad.ascent.time != null ? S.pad.ascent.time : ASCENT_TIME)),
+          r: F('Transfer after insert', w ? fmtT(w.tof) : '——') },
         {},
         { l: NAV('<ASCENT', 'LNCH#0'), r: p.lifted ? NAV('ORBIT>', 'ORB')
              : F('', p.hold ? 'RESUME COUNT*' : 'HOLD COUNT*', 'go', () => exec(p.hold ? 'COUNT GO' : 'COUNT HOLD')) },
@@ -5516,7 +6104,9 @@ COMM: Object.assign(one('COMMUNICATIONS'), { sub: () => S.loads.COMM ? 'TX ON' :
   ]; } }),
 
 LIFE: Object.assign(one('LIFE SUPPORT'), { sub: () => S.craft.crew ? S.craft.crew + ' CREW' : 'UNCREWED', build: () => {
-  if (!S.craft.crew) return [{ full: F('', 'UNCREWED VEHICLE', 'dim') }, {}, {}, {}, {}, menuRow('POWER>', 'PWR')];
+  if (!S.craft.crew) return [{ full: F('', 'UNCREWED VEHICLE', 'dim') }, {}, {}, {},
+    { l: NAV('<SURFACE OPS', 'SURF'), r: F('Crew', 'NONE ABOARD', 'dim') },
+    menuRow('POWER>', 'PWR')];
   // Oxygen is lethal now, so the endurance is the headline number and the rate
   // that produces it is right underneath, with life support off multiplying it.
   const fan = S.dock.air.fan, live = sysOn('ECLSS');
@@ -5540,7 +6130,10 @@ LIFE: Object.assign(one('LIFE SUPPORT'), { sub: () => S.craft.crew ? S.craft.cre
           ? 'The loop is closed: CO₂ is reduced back to water and the water is electrolysed, so the oxygen comes round again and the tank is not touched. It runs on the bus. Lose the bus and the tank is all there is.'
           : `LIFE SUPPORT IS OFF — nothing is scrubbing the air, so the crew are flushing the cabin and burning the reserve at ${ECLSS_OPEN_RATE}× what they breathe. Bring ECLSS up on the systems page.`,
         live || fan ? 'body' : 'go'), wrap: true },
-    { l: NAV('<SYSTEMS', 'SYS'),
+    // Going outside is a life-support event before it is anything else — the
+    // suits ARE the open loop — so the surface page hangs off this one. A
+    // link, not a thirteenth function key.
+    { l: NAV('<SURFACE OPS', 'SURF'),
       r: S.dock.phase === 'HARD' ? NAV('UTILITIES>', 'UTIL') : NAV('POWER>', 'PWR') },
   ]; } }),
 
@@ -5548,6 +6141,40 @@ LIFE: Object.assign(one('LIFE SUPPORT'), { sub: () => S.craft.crew ? S.craft.cre
    The corridor has to be readable BEFORE you commit, the way max Q is shown
    against its design limit on the LAUNCH page. Flying blind into a two-sided
    limit is a coin toss, not a puzzle.                                       */
+SURF: { count: () => 1, title: () => 'SURFACE OPERATIONS',
+  sub: () => { const u = S.surf;
+    return !S.landed ? 'NOT LANDED' : !u ? 'ABOARD'
+         : u.phase === 'INSIDE' ? 'ABOARD' : u.phase === 'PREP' ? 'DEPRESSURISING'
+         : u.phase === 'BACK' ? 'REPRESSURISING' : u.phase === 'COLLECT' ? 'COLLECTING' : 'OUTSIDE'; },
+  build: () => {
+    const u = S.surf, mf = S.manifest, b = soiBody();
+    const foot = { l: NAV('<MENU', 'MENU'), r: S.pad && !S.pad.lifted ? NAV('LAUNCH>', 'LNCH') : NAV('ORBIT>', 'ORB') };
+    if (!S.landed)
+      return [ { full: F('', 'THE CREW ARE NOT ON A SURFACE. This page is the work done outside, and there is nothing outside yet.', 'body'), wrap: true },
+               {}, {}, {}, {}, foot ];
+    const want = mf ? mf.collect : 0;
+    const got = u ? u.out : 0;
+    const cycling = u && (u.phase === 'PREP' || u.phase === 'BACK');
+    return [
+      { l: F('Site', (S.pad && S.pad.site) || 'SURFACE', 'ok'),
+        r: F('On', b.name + '  ' + (surfaceG(b)).toFixed(2) + ' m/s²') },
+      { l: F('Crew', (u && u.phase !== 'INSIDE' ? 'OUTSIDE · ' : 'ABOARD · ') + S.craft.crew,
+             u && u.phase !== 'INSIDE' ? 'go' : 'ok'),
+        r: F('O₂ reserve', fmtT(S.craft.o2 / Math.max(1e-9, S.craft.crew) * 3600),
+             S.craft.o2 < 24 * S.craft.crew ? 'bad' : '') },
+      { l: F('Samples', got.toFixed(0) + ' / ' + want.toFixed(0) + ' kg', got >= want && want > 0 ? 'ok' : ''),
+        r: cycling ? F('Cycle', fmtT(Math.max(0, SURF_CYCLE - u.t))) : F('Hold', S.craft.cargo.toFixed(0) + ' kg') },
+      { l: F('', (!u || u.phase === 'INSIDE') ? 'EVA — GO OUTSIDE*' : 'EVA*',
+             (!u || u.phase === 'INSIDE') ? 'go' : 'dim', () => exec('SURF EVA')),
+        r: F('', u && u.phase === 'COLLECT' ? 'PAUSE COLLECTION*' : 'COLLECT SAMPLES*',
+             u && (u.phase === 'OUT' || u.phase === 'COLLECT') ? 'go' : 'dim', () => exec('SURF SAMPLE')) },
+      { l: F('', 'BACK ABOARD*', u && (u.phase === 'OUT' || u.phase === 'COLLECT') ? 'go' : 'dim',
+             () => exec('SURF IN')),
+        r: F('Outside costs', ECLSS_OPEN_RATE + '× the reserve') },
+      foot,
+    ];
+  } },
+
 ENTR: { count: () => 2, title: (i) => i ? 'RECOVERY' : 'ENTRY',
   sub: () => { const sh = S.shield;
     return !sh.fitted ? 'NO SHIELD' : sh.gone ? 'SHIELD GONE'
@@ -5730,6 +6357,10 @@ MENU: { count: () => 2, title: () => 'INDEX', sub: () => '', build: (pg) => pg =
       r: S.shield.fitted ? F('Heat shield', (100 - S.shield.load/S.shield.cap*100).toFixed(0) + '%',
                              S.shield.gone ? 'bad' : S.shield.load > S.shield.cap*0.6 ? 'go' : 'ok')
                          : F('Heat shield', 'NOT FITTED', 'dim') },
+    // And the surface, for the one flight that stands on one. Same rule: a
+    // link, never a thirteenth key.
+    { l: NAV('<SURFACE', 'SURF'),
+      r: S.landed ? F('Site', (S.pad && S.pad.site) || 'LANDED', 'ok') : F('Site', 'IN FLIGHT', 'dim') },
   ] },
 
 HELP: { count: () => HELP_PAGES.length, title: () => 'REFERENCE', sub: () => HELP_PAGES[CDU.sub].t,
