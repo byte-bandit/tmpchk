@@ -341,30 +341,91 @@ console.log('\nTHE WHOLE FLIGHT');
   ok('phase 7 · past Mars and back out into the Sun\'s sphere', ph(6),
      `MET ${g.fmtMET(s.t)}, on ${(g.D.e.rp/g.AU).toFixed(3)}x${(g.D.e.ra/g.AU).toFixed(3)} AU`);
 
-  runPlan('PLAN XFER EARTH');
-  n = 0; while (n++ < 200000 && s.status === 'flight' && s.soi !== 'EARTH') g.advance(3600);
-  ok('phase 8 · home, on a hyperbola', ph(7),
-     `Earth SOI at MET ${g.fmtMET(s.t)}, periapsis ${g.D.perAlt.toFixed(0)} km, e ${g.D.e.e.toFixed(3)}`);
-
-  // Capture into an ELLIPSE. Circularising at the arrival periapsis costs more
-  // than the ship carries and would strand it with no way down.
-  {
-    const mu = G.BODIES.EARTH.mu, R = G.BODIES.EARTH.R, e0 = g.D.e, rp = e0.rp;
-    const vNow = Math.sqrt(mu * (1 + e0.e) / rp);
-    const aWant = (rp + R + 18000) / 2;
-    const dv = (vNow - Math.sqrt(mu * (2 / rp - 1 / aWant))) * 1000;
-    const m0 = g.craftMass(), isp = s.craft.isp;
-    const secs = (m0 - m0 / Math.exp(dv / (isp * 9.80665))) / (s.craft.thrust * 1000 / (isp * 9.80665));
-    ok('the capture is affordable on the fast arrival, not just the lucky one',
-       dv < g.D.dv, `${dv.toFixed(0)} m/s needed, ${g.D.dv.toFixed(0)} aboard`);
-    g.exec(`BURN RET ${secs.toFixed(1)} AT PE`);
-    n = 0; while (n++ < 600000 && s.status === 'flight' && (s.sched || s.burn)) g.advance(1);
+  // THE RETURN, planned from the arc the flyby left rather than from a circle.
+  //
+  // `PLAN XFER EARTH` still answers here, and the answer is still the one item
+  // 05 measured: it departs for 2,115 m/s, crosses Earth's orbit at v∞ 10.679
+  // km/s and arrives with periapsis 6,110 km out, where the capture alone is
+  // 6,839 m/s of the 8,274 aboard. That is why this mission used to stop in
+  // orbit. The arc transfer is planned instead, and the departure window is
+  // the point of the exercise — see below.
+  const k0 = g.lines().length;
+  g.exec('PLAN LAMBERT EARTH 300 30');
+  const lamRow = (re) => (g.since(k0).find(l => re.test(l)) || '').trim();
+  const P = s.lambert;
+  ok('the arc transfer is solved from the eccentric arc itself',
+     !!P && P.entered && Math.abs(P.periAlt - 300) < 50,
+     `${P.evals} trajectories · depart in ${(P.wait/86400).toFixed(1)} d, ${(P.tof/86400).toFixed(0)} d out, `
+     + `${P.dvDep.toFixed(0)} m/s, v-inf ${P.vinf.toFixed(3)} km/s, arrive ${P.periAlt.toFixed(0)} km`);
+  ok('and it comes in the way Earth turns, which is worth 1.44x the heating rate',
+     P.withSpin, lamRow(/GOES ROUND/));
+  ok('the plan leaves the ship light enough to land',
+     P.massAfter <= s.craft.entryMax,
+     `${P.massAfter.toFixed(0)} kg of ${s.craft.entryMax} — the CHEAPEST transfer this planner finds `
+     + `waits 476 days, costs 1,383 m/s, and arrives at 10,212 kg, which cannot come down`);
+  const bl = (g.since(k0).filter(l => /^\s*→\s*BURN /.test(l)).pop() || '').replace(/^\s*→\s*/, '');
+  ok('and it is quoted as an executable inertial burn', /^BURN INRT /.test(bl), bl);
+  const fuelBefore = s.craft.fuel;
+  g.exec(bl);
+  n = 0; while (n++ < 900000 && s.status === 'flight' && (s.sched || s.burn)) {
+    const ti = s.sched ? g.timeToIgnition() : Infinity;
+    g.advance(s.burn ? 0.5 : ti > 86400 ? 21600 : ti > 3600 ? 600 : ti > 60 ? 20 : 1);
   }
-  ok('phase 9 · captured into Earth orbit, and the mission is over', ph(8) && s.completed,
-     `${g.D.perAlt.toFixed(0)}x${g.D.apoAlt.toFixed(0)} km, e=${g.D.e.e.toFixed(3)}, ${g.D.dv.toFixed(0)} m/s spare`);
+  const depSpent = fuelBefore - s.craft.fuel;
+  n = 0; while (n++ < 900000 && s.status === 'flight' && s.soi !== 'EARTH') g.advance(3600);
+  ok('phase 8 · home, on a hyperbola, and a gentle one', ph(7) && g.D.e.e < 2,
+     `Earth SOI at MET ${g.fmtMET(s.t)}, periapsis ${g.D.perAlt.toFixed(0)} km, e ${g.D.e.e.toFixed(4)}, `
+     + `${depSpent.toFixed(0)} kg spent on the departure, ${g.D.dv.toFixed(0)} m/s left`);
+
+  // Capture into a LOW ORBIT, not an ellipse. Entry from a 20,000 km ellipse
+  // is 9.8 km/s at the interface against 7.86 from here, and cubed that is
+  // more than twice the heating rate.
+  {
+    const mu = g.BODIES.EARTH.mu, e0 = g.D.e, rp = e0.rp;
+    const dvc = (Math.sqrt(mu * (1 + e0.e) / rp) - Math.sqrt(mu / rp)) * 1000;
+    const secs = g.burnTimeFor(dvc);   // g, not G: G is a different booted game
+    ok('stopping dead in a low orbit is affordable now, which it was not before',
+       dvc < g.D.dv, `${dvc.toFixed(0)} m/s to circularise, ${g.D.dv.toFixed(0)} aboard`);
+    const before = s.craft.fuel;
+    g.exec(`BURN RET ${secs.toFixed(2)} AT PE`);
+    n = 0; while (n++ < 900000 && s.status === 'flight' && (s.sched || s.burn)) {
+      const ti = s.sched ? g.timeToIgnition() : Infinity;
+      g.advance(s.burn ? 0.25 : ti > 3600 ? 300 : ti > 60 ? 10 : 0.5);
+    }
+    ok('phase 9 · captured, in a low circular orbit', ph(8),
+       `${g.D.perAlt.toFixed(0)}x${g.D.apoAlt.toFixed(0)} km, e=${g.D.e.e.toFixed(4)}, `
+       + `${(before - s.craft.fuel).toFixed(0)} kg spent, ${g.D.dv.toFixed(0)} m/s left`);
+  }
+  const entryMass = g.craftMass();
+  ok('and it weighs what this airframe can land',
+     entryMass <= s.craft.entryMax,
+     `${entryMass.toFixed(0)} kg of ${s.craft.entryMax}, shield face ${s.craft.cda} m2, `
+     + `beta ${(entryMass/s.craft.cda).toFixed(0)} kg/m2`);
+
+  runPlan('PLAN PERI 30');
+  ok('phase 10 · periapsis inside this airframe\'s own corridor', ph(9),
+     `${g.D.perAlt.toFixed(1)} km, band ${MARS_BAND[0]} to ${MARS_BAND[1]} km`);
+
+  let drogue = false, mains = false, peak = 0, eiV = 0, eiAir = 0;
+  n = 0;
+  while (n++ < 3000000 && s.status === 'flight') {
+    const alt = g.D.alt;
+    g.advance(alt > 2000 ? 60 : alt > 200 ? 5 : 0.2);
+    if (!eiV && g.D.rho > 0) { eiV = g.D.e.v; eiAir = g.D.vAir; }
+    if (s.shield.rate > peak) peak = s.shield.rate;
+    if (!drogue && g.D.alt < 25 && g.D.rho > 0) { g.exec('DROGUE'); drogue = true; }
+    if (drogue && !mains && g.D.alt < 6) { g.exec('MAINS'); mains = true; }
+    if (s.status !== 'flight' || s.landed) break;
+  }
+  ok('phase 11 · through the corridor with the shield intact', ph(10) && !s.shield.gone,
+     `interface ${eiV.toFixed(3)} km/s inertial, ${eiAir.toFixed(3)} air-relative; `
+     + `peak ${(peak/1000).toFixed(0)} kW/m2 (${(peak/s.shield.rateLimit).toFixed(2)}x the limit), `
+     + `${(s.shield.load/1e6).toFixed(1)} MJ/m2 of ${(s.shield.cap/1e6).toFixed(0)} spent`);
+  const splash = (g.lines().filter(l => /SPLASHDOWN on/.test(l)).pop() || '').trim();
+  ok('phase 12 · in the water, and the mission is over', ph(11) && s.completed,
+     `MET ${g.fmtMET(s.t)} = ${(s.t/86400/365.25).toFixed(2)} years — ${splash.slice(0, 72)}`);
   ok('the air held for the whole flight, because the loop never opened',
      s.craft.o2 > 1900 && s.power.batt > 0,
-     `${s.craft.o2.toFixed(0)} crew-hours of reserve still aboard after ${(s.t/86400/365.25).toFixed(2)} years`);
+     `${s.craft.o2.toFixed(0)} crew-hours of reserve still aboard, ${s.craft.fuel.toFixed(0)} kg of propellant left`);
 }
-
 T.done('the Mars round trip: all checks passed');

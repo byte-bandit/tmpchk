@@ -41,6 +41,12 @@ const LATE = [
   'surfaceG', 'VEHICLE_KEYS', 'stashVehicle', 'wearVehicle', 'stepAway', 'stepSurf',
   'freshSurf', 'SURF_CYCLE', 'SURF_RATE', 'teiSolve', 'escapeToParent', 'LUNAR_BAND',
   'LANDER_MASS', 'attError',
+  // item 07: the Lambert solver, its planner and the arc-transfer command
+  'lambert', 'LAMBERT_ZTOP', 'LAMBERT_TOL', 'lambertPlan', 'lambertScan',
+  'lambertRealise', 'captureCost', 'aimOffset', 'stumpffC', 'stumpffS',
+  'bodyStateIn', 'burnTimeFor', 'MARS_BAND', 'CARGO_BAND', 'PARK_ALT',
+  'SHIELD_RATE', 'SHIELD_LOAD', 'rig', 'cmdPlan', 'startBurn', 'setAttMode',
+  'setHelio', 'chuteSize', 'CHUTES', 'captureCost', 'aimOffset',
 ];
 
 function boot(file = GAME) {

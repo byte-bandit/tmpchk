@@ -155,6 +155,7 @@ const { suite } = require('../harness');
        await p.evaluate(()=>{ gotoPage('ENTR',0); renderCDU(); return document.getElementById('cdu-body').textContent; })));
     ok('ENTRY is a link, not a 13th function key', g.pkCount===12);
 
+
     // Stand the vehicle in a hard dock with the hatch open so the cargo page
     // is the real one rather than the INHIBITED placeholder.
     await p.evaluate(()=>{ S.dock.phase='HARD'; S.dock.vest.leakOk=true; S.dock.vest.hatch=true;
@@ -171,6 +172,36 @@ const { suite } = require('../harness');
     ok('and it shows the hold, the manifest and what carrying it costs',
        /DELIVER CARGO/.test(cargoPg.text) && /1800/.test(cargoPg.text) && /remaining/.test(cargoPg.text),
        (cargoPg.text.match(/In the hold[^A-Z]*/) || ['—'])[0].slice(0, 40));
+
+    // The ARC TRANSFER page, added by item 07. It is the densest readout in the
+    // console: two ΔV figures in one field, a heading to two decimals, a flight
+    // time in days and an arrival mass against what the airframe can land. The
+    // pair field shipped as "3.929 km/s / 5.214 km/s" and ran off a 375 px
+    // screen — measured, not guessed — which is why both of its states are
+    // walked here rather than only the empty one.
+    await p.fill('#cmd','MIS 5'); await p.press('#cmd','Enter'); await p.waitForTimeout(300);
+    await p.fill('#cmd','PWR UP'); await p.press('#cmd','Enter'); await p.waitForTimeout(300);
+    const lambEmpty = await p.evaluate(()=>{ gotoPage('LAMB',0); renderCDU();
+      return { scrollX: document.documentElement.scrollWidth > window.innerWidth+1,
+        text: document.getElementById('cdu-body').textContent,
+        clip: [...document.querySelectorAll('.fval, .flab')]
+          .filter(el=>el.textContent.trim() && el.scrollWidth > el.clientWidth + 1).map(el=>el.textContent.slice(0,40)) }});
+    ok('ARC TRANSFER fits before anything is solved', !lambEmpty.scrollX && lambEmpty.clip.length===0,
+       lambEmpty.clip.join(' | ') || 'clean');
+    ok('and it says what it is for, and how it differs from PLAN XFER',
+       /Hohmann/.test(lambEmpty.text) && /arc you are actually on/.test(lambEmpty.text));
+    await p.evaluate(()=>{ exec('PLAN LAMBERT MOON'); });
+    await p.waitForTimeout(1500);
+    const lambSolved = await p.evaluate(()=>{ gotoPage('LAMB',0); renderCDU();
+      return { scrollX: document.documentElement.scrollWidth > window.innerWidth+1,
+        text: document.getElementById('cdu-body').textContent,
+        clip: [...document.querySelectorAll('.fval, .flab')]
+          .filter(el=>el.textContent.trim() && el.scrollWidth > el.clientWidth + 1).map(el=>el.textContent.slice(0,40)) }});
+    ok('ARC TRANSFER fits with a solved transfer on it', !lambSolved.scrollX && lambSolved.clip.length===0,
+       lambSolved.clip.join(' | ') || 'clean');
+    ok('and the solution is on the page', /Both burns/.test(lambSolved.text) && /Arrival peri/.test(lambSolved.text),
+       (lambSolved.text.match(/Both burns[^A-Z]*/) || ['—'])[0].slice(0, 30));
+    ok('ARC TRANSFER is a link, not a 13th function key', g.pkCount===12);
 
     ok('no page errors', errs.length===0, errs.join('|'));
     await ctx.close();

@@ -596,6 +596,115 @@ function tToPeri(el, mu) {
 }
 const tToApo = (el,mu) => timeToAnomaly(el, mu, Math.PI);
 
+/* ---- Lambert: the two endpoints and the clock ---------------
+   `keplerStep` answers "where will this be in dt seconds". Lambert answers the
+   other question: "what velocity gets me from HERE to THERE in dt seconds".
+   That is the question a transfer actually asks, and it is the one
+   `transferWindow` cannot ask — a Hohmann between two circles is the answer to
+   a question with no free variables in it, which is why it is only valid from
+   the one orbit it assumes.
+
+   Universal variables again, on purpose: the same Stumpff C(z)/S(z) already
+   above, so an ellipse, a parabola and a hyperbola are one formula and one
+   iteration. The unknown is z = (1/a)x², and the flight time is monotonically
+   increasing in it over the whole range where the auxiliary y(z) is positive
+   — measured, across every case in tests/lambert.test.js. Monotone means
+   BISECTION, and bisection cannot walk away from a root the way Newton did on
+   the Mars arrival hyperbola. It costs ~60 evaluations instead of ~5 and it
+   never lies; on this hardware a fourteen-thousand-point porkchop still solves
+   in a sixth of a second.
+
+   PLANAR, like everything else here. In a plane there is no "short way versus
+   long way" as a separate choice from prograde versus retrograde: fixing the
+   sense of rotation fixes the transfer angle, and taking the long way round IS
+   reversing the sense. Both spellings are accepted because callers think in
+   both, and `longWay` simply flips `dir`.
+
+   ZERO REVOLUTIONS. If dt is longer than the period of the arc you fed it, the
+   answer is a different, larger ellipse that also joins the two points in that
+   time — a correct transfer, not a bug, and the test measures it as such.   */
+const LAMBERT_ZTOP = 4*Math.PI*Math.PI;   // one full revolution; t → ∞ here
+// On the flight time, relative — and this is the floor, not a preference.
+// Bisection closes the bracket to the last bit of z, and near z = 0 the map
+// from z to flight time is steep enough that the last bit of z is still a
+// tenth of a microsecond of t. Measured across every case in
+// tests/lambert.test.js the worst flight-time residual is 1.5e-7 s on a 3,600 s
+// hyperbolic arc — four parts in 1e11 — and the worst VELOCITY residual, which
+// is the number anything downstream actually feels, is 1.0e-7 m/s. Everywhere
+// else, including a 400-day heliocentric arc, it is around 1e-10 m/s.
+const LAMBERT_TOL  = 1e-9;
+function lambert(r1v, r2v, dt, mu, opts) {
+  const o = opts || {};
+  let dir = o.dir === -1 ? -1 : 1;              // +1 prograde (counterclockwise)
+  if (o.longWay) dir = -dir;                    // in a plane, the same knob
+  const r1 = V.len(r1v), r2 = V.len(r2v);
+  if (!(r1 > 0) || !(r2 > 0) || !(dt > 0) || !isFinite(dt) || !(mu > 0)) return null;
+  let cosdnu = V.dot(r1v, r2v)/(r1*r2);
+  cosdnu = Math.max(-1, Math.min(1, cosdnu));
+  if (Math.abs(1 - cosdnu) < 1e-14) return null;             // the same point
+  let dnu = Math.acos(cosdnu);
+  if (V.crs(r1v, r2v)*dir < 0) dnu = TAU - dnu;
+  const A = Math.sin(dnu) * Math.sqrt(r1*r2/(1 - cosdnu));
+  if (!isFinite(A) || Math.abs(A) < 1e-12) return null;      // collinear
+
+  const yOf = (z) => r1 + r2 + A*(z*stumpffS(z) - 1)/Math.sqrt(stumpffC(z));
+  const tOf = (z) => { const y = yOf(z); if (!(y > 0)) return NaN;
+    const x = Math.sqrt(y/stumpffC(z));
+    return (x*x*x*stumpffS(z) + A*Math.sqrt(y))/Math.sqrt(mu); };
+
+  // The low end of the bracket, where the flight time is shorter than dt.
+  let lo;
+  if (A > 0) {
+    // y rises with z, so the usable domain is (edge, 4π²) and t → 0 at the
+    // edge. Walk down until y turns negative, then bisect for the edge.
+    let neg = -LAMBERT_ZTOP, k = 0;
+    while (yOf(neg) > 0 && k++ < 200) neg *= 2;
+    if (yOf(neg) > 0) return null;
+    let a = neg, b = LAMBERT_ZTOP*0.999999;
+    for (let i = 0; i < 200 && b - a > 1e-13*Math.max(1, Math.abs(b)); i++) {
+      const m = (a + b)/2; if (yOf(m) > 0) b = m; else a = m;
+    }
+    lo = b;
+  } else {
+    // y falls with z but stays positive all the way down, and so does t.
+    lo = -LAMBERT_ZTOP;
+    let k = 0;
+    while (k++ < 200) { const t = tOf(lo); if (isFinite(t) && t <= dt) break; lo *= 2; }
+    const t0 = tOf(lo);
+    if (!(isFinite(t0) && t0 <= dt)) return null;
+  }
+  // The high end. z = 4π² is a full revolution: t is infinite there and the
+  // arithmetic is 0/0, so approach it by halving the gap and stop at the first
+  // z whose flight time already exceeds dt.
+  let hi = NaN;
+  for (let gap = LAMBERT_ZTOP - lo, i = 0; i < 200; i++) {
+    gap /= 2;
+    const z = LAMBERT_ZTOP - gap, t = tOf(z);
+    if (isFinite(t) && t >= dt) { hi = z; break; }
+  }
+  if (!isFinite(hi)) return null;                            // slower than one rev
+
+  let z = lo;
+  for (let i = 0; i < 200; i++) {
+    z = (lo + hi)/2;
+    const tm = tOf(z);
+    if (!isFinite(tm) || tm < dt) lo = z; else hi = z;
+    if (hi - lo <= 1e-14*Math.max(1, Math.abs(z))) break;
+  }
+  z = (lo + hi)/2;
+  const y = yOf(z);
+  if (!(y > 0)) return null;
+  const g = A*Math.sqrt(y/mu);
+  if (!isFinite(g) || Math.abs(g) < 1e-14) return null;
+  const f = 1 - y/r1, gd = 1 - y/r2;
+  const v1 = V.mul(V.sub(r2v, V.mul(r1v, f)), 1/g);
+  const v2 = V.mul(V.sub(V.mul(r2v, gd), r1v), 1/g);
+  if (![v1.x, v1.y, v2.x, v2.y].every(isFinite)) return null;
+  const got = tOf(z), resid = Math.abs(got - dt);
+  return { v1, v2, z, dnu, A, y, tof:got, resid,
+           ok: resid <= Math.max(LAMBERT_TOL*dt, 1e-6) };
+}
+
 /* ---- circular / escape speeds ------------------------------ */
 const vCirc = (mu,r) => Math.sqrt(mu/r);
 const vAtR  = (mu,r,a) => Math.sqrt(Math.max(0, mu*(2/r - 1/a)));
@@ -624,6 +733,10 @@ const S = {
   depot: null,
   landingAllowed: false, thermLimit: 800, completed: false, pauseAfterBurn: false,
   solution: null, planName: '', planDetail: '', burnSel: { dir:'PRO', at:'AP', dur:0 },
+  // The last arc transfer the Lambert planner found, for the LAMB page to
+  // read. A plain bag of numbers, so it clones into a checkpoint like the
+  // rest of the state.
+  lambert: null,
   // Attitude is real state now: a planar sim, so one angle plus its rate.
   // `mode` is what the autopilot is chasing; `theta` is where the nose is.
   att: { theta: 0, rate: 0, mode: 'PRO', inertial: 0, slewing: false },
@@ -679,10 +792,23 @@ function freshShield() {
    only ever the tear-away. The mains' 0.80 kPa ceiling is the one that makes
    the drogue compulsory: without it the vehicle is still at 1.86 kPa passing
    6 km and the canopy comes straight off. */
+/* The reference canopies: M-10's capsule, which is the airframe they were
+   measured on. Arming altitude, tear pressure and inflation time are fabric
+   and hardware — they belong to the canopy and do not move. AREA belongs to
+   the VEHICLE, for exactly the reason `cda` does: a canopy is sized for the
+   mass it has to hold, and a set sized for a five-tonne capsule brings a
+   ten-tonne ship down at 11 m/s against a 10 m/s limit. Measured. */
 const CHUTES = {
   DROGUE: { label:'DROGUE', arm: 25, area: 110,  qTear: 3000, infl: 4 },
   MAIN:   { label:'MAINS',  arm: 6,  area: 1100, qTear: 800,  infl: 8 },
 };
+/** The area of `id` on THIS vehicle. A craft that declares none flies the
+ *  reference set, which is every vehicle that shipped before this. */
+function chuteSize(id) {
+  const own = S.craft.chutes;
+  const a = own && own[id];
+  return a != null ? a : CHUTES[id].area;
+}
 function freshChutes() {
   return { DROGUE: { state:'STOWED', t:0 }, MAIN: { state:'STOWED', t:0 } };
 }
@@ -692,7 +818,7 @@ function chuteArea() {
   for (const id in CHUTES) {
     const c = S.chute[id];
     if (!c || c.state !== 'OUT') continue;
-    a += CHUTES[id].area * Math.min(1, c.t / CHUTES[id].infl);   // inflating takes time
+    a += chuteSize(id) * Math.min(1, c.t / CHUTES[id].infl);   // inflating takes time
   }
   return a;
 }
@@ -1234,7 +1360,7 @@ function deployChute(id) {
   if (alt > def.arm) return `${def.label} ARMED BELOW ${def.arm} km — you are at ${alt.toFixed(1)} km.`;
   c.state = 'OUT'; c.t = 0;
   say(`${def.label} STREAMED at ${alt.toFixed(1)} km, ${(D.q/1000).toFixed(2)} kPa. `
-    + `Full ${def.area} m² in ${def.infl} s; they come off above ${(def.qTear/1000).toFixed(2)} kPa.`, 'key');
+    + `Full ${chuteSize(id)} m² in ${def.infl} s; they come off above ${(def.qTear/1000).toFixed(2)} kPa.`, 'key');
   return null;
 }
 
@@ -2494,7 +2620,7 @@ function fireSchedule() {
   const ti = timeToIgnition();
   if (ti <= 0.5) {
     const sc = S.sched; S.sched = null;
-    startBurn(sc.dir, sc.dur, true);
+    startBurn(sc.dir, sc.dur, true, sc.inrt);
   }
 }
 </script>
@@ -2783,6 +2909,15 @@ function fmtVel(kms) {
   return Math.abs(kms) < 1 ? (kms*1000).toFixed(1) + ' m/s' : kms.toFixed(3) + ' km/s';
 }
 function fmtDV(ms) { return (ms >= 1000 ? (ms/1000).toFixed(3)+' km/s' : ms.toFixed(1)+' m/s'); }
+/* Two ΔV figures side by side with the unit printed once — "3.929 / 5.214 km/s"
+   rather than a pair of fully-qualified numbers, which runs off the side of a
+   375 px screen. The unit is chosen by the larger of the two so that neither
+   number collapses to a coarser one. */
+function fmtDVPair(a, b) {
+  const big = Math.max(a, b);
+  return big >= 1000 ? (a/1000).toFixed(3) + ' / ' + (b/1000).toFixed(3) + ' km/s'
+                     : a.toFixed(1) + ' / ' + b.toFixed(1) + ' m/s';
+}
 /* Proximity operations are worked in centimetres and hundredths of a metre per
    second. fmtDist renders both 0.15 m and 0.25 m as "0 m" and fmtVel renders
    0.03 m/s as "0.0 m/s" — at docking scale those are the difference between a
@@ -2934,14 +3069,19 @@ const DIRS = {
   ROUT:'ROUT', RADOUT:'ROUT', OUT:'ROUT', UP:'ROUT',
   RIN:'RIN', RADIN:'RIN', IN:'RIN', DOWN:'RIN',
 };
-const DIRNAME = { PRO:'prograde', RET:'retrograde', ROUT:'radial out', RIN:'radial in' };
+const DIRNAME = { PRO:'prograde', RET:'retrograde', ROUT:'radial out', RIN:'radial in',
+                  INRT:'inertial' };
 const ATTNAME = { PRO:'PROGRADE', RET:'RETROGRADE', ROUT:'RADIAL OUT', RIN:'RADIAL IN',
                   TGT:'TARGET', ATGT:'ANTI-TARGET', INRT:'INERTIAL', FREE:'FREE DRIFT',
                   PAXS:'DOCK AXIS' };
 /** What the ORB page should call the current attitude. */
 const attLabel = () => S.dock.phase !== 'FREE' ? 'MATED' : (ATTNAME[S.att.mode] || S.att.mode);
 
-function startBurn(dir, dur, scheduled) {
+/** Light the engine. `inertial` is used only by the INRT heading: a Lambert
+ *  ΔV is a vector, so the one steering reference that can fly it is an angle
+ *  somebody else decides — which is exactly what INRT already was, for the
+ *  ascent pitch program. */
+function startBurn(dir, dur, scheduled, inertial) {
   if (S.status !== 'flight') return say('Vehicle is not in flight.', 'err');
   if (S.dock.phase !== 'FREE') return say('MATED TO THE STATION — the main engine is inhibited. UNDOCK first.', 'err');
   if (S.craft.fuel <= 0) return say('No main propellant remaining.', 'err');
@@ -2952,10 +3092,11 @@ function startBurn(dir, dur, scheduled) {
     : 'GUIDANCE NOT ALIGNED — without an aligned platform there is no attitude reference and the engine will not light. Bring GUIDANCE up on the SYS page.', 'err');
   S.preBurnWarp = S.warp;
   if (S.warp > 10) S.warp = 10;
-  setAttMode(dir);
+  setAttMode(dir, dir === 'INRT' ? inertial : undefined);
   S.burn = { dir, left:dur, total:dur };
   const est = burnDV(dur);
-  say(`IGNITION · ${DIRNAME[dir]} for {${dur.toFixed(1)} s}  ≈ {${fmtDV(est)}}`
+  say(`IGNITION · ${DIRNAME[dir]}${dir === 'INRT' ? ` ${(normAngle(S.att.inertial)*180/Math.PI).toFixed(2)}°` : ''}`
+      + ` for {${dur.toFixed(1)} s}  ≈ {${fmtDV(est)}}`
       + (scheduled ? '  (scheduled)' : ''), 'key');
 }
 function burnDV(dur) {
@@ -3000,15 +3141,24 @@ function exec(raw) {
   }
 
   case 'BURN': case 'B': {
-    const dir = DIRS[A[0]];
-    if (!dir) return say('Usage: BURN <PRO|RET|RIN|ROUT> <seconds> [AT PE|AP|T+<s>]', 'err');
-    const dur = num(1, NaN);
+    // BURN INRT <heading°> <seconds> — an inertially-fixed thrust direction,
+    // measured anticlockwise from the +x axis in the current reference frame.
+    // It takes one more argument than the other four because the other four
+    // name a direction the vehicle can work out for itself and this one does
+    // not. A Lambert solution is flown with it and quotes it ready to type.
+    const inrtForm = A[0] === 'INRT' || A[0] === 'INERTIAL' || A[0] === 'VEC';
+    const dir = inrtForm ? 'INRT' : DIRS[A[0]];
+    if (!dir) return say('Usage: BURN <PRO|RET|RIN|ROUT> <seconds> [AT PE|AP|T+<s>]   ·   BURN INRT <heading°> <seconds> [AT T+<s>]', 'err');
+    const hdg = inrtForm ? num(1, NaN) : 0;
+    if (inrtForm && !isFinite(hdg)) return say('Usage: BURN INRT <heading°> <seconds> [AT T+<s>]', 'err');
+    const inrt = hdg * Math.PI/180;
+    const dur = num(inrtForm ? 2 : 1, NaN);
     if (!isFinite(dur) || dur <= 0) return say('Burn duration in seconds is required. e.g. BURN PRO 42', 'err');
     const atIx = A.indexOf('AT');
     if (atIx >= 0) {
       const w = A[atIx+1] || '';
       if (w === 'PE' || w === 'AP') {
-        S.sched = { dir, dur, at:w }; setAttMode(dir);
+        S.sched = { dir, dur, at:w, inrt }; setAttMode(dir, inrt);
         const tt = w === 'PE' ? D.tPeri : D.tApo;
         return say(`BURN ARMED · ${DIRNAME[dir]} ${dur.toFixed(1)} s at ${w === 'PE' ? 'periapsis' : 'apoapsis'}, T−{${fmtT(tt)}}. Ignition starts {${(dur/2).toFixed(1)} s} early to centre the burn.`, 'key');
       }
@@ -3016,16 +3166,16 @@ function exec(raw) {
         const tk = A[atIx+2];
         if (!tk || !BODIES[tk]) return say('Usage: BURN <DIR> <SEC> AT XFER <BODY>', 'err');
         if (BODIES[tk].parent !== S.soi) return say(`${tk} does not orbit ${soiBody().name}.`, 'err');
-        S.sched = { dir, dur, at:'XFER', body:tk }; setAttMode(dir);
+        S.sched = { dir, dur, at:'XFER', body:tk, inrt }; setAttMode(dir, inrt);
         const win = transferWindow(tk);
         return say(`BURN ARMED · ${DIRNAME[dir]} ${dur.toFixed(1)} s at the ${tk} transfer window, T−{${fmtT(win.wait)}}. Wind the clock up — the console will hold the node.`, 'key');
       }
       const m = w.match(/^T\+?(\d+(\.\d+)?)$/);
-      if (m) { S.sched = { dir, dur, at:'T', when:S.t + parseFloat(m[1]) }; setAttMode(dir);
-        return say(`BURN ARMED · ${DIRNAME[dir]} ${dur.toFixed(1)} s in {${fmtT(parseFloat(m[1]))}}.`, 'key'); }
+      if (m) { S.sched = { dir, dur, at:'T', when:S.t + parseFloat(m[1]), inrt }; setAttMode(dir, inrt);
+        return say(`BURN ARMED · ${DIRNAME[dir]}${dir === 'INRT' ? ` ${hdg.toFixed(2)}°` : ''} ${dur.toFixed(1)} s in {${fmtT(parseFloat(m[1]))}}.`, 'key'); }
       return say('AT takes PE, AP, or T+<seconds>.', 'err');
     }
-    return startBurn(dir, dur);
+    return startBurn(dir, dur, false, inrt);
   }
 
   case 'CANCEL': case 'ABORT': case 'MECO': {
@@ -3311,15 +3461,23 @@ function quoteBurn(dv, whereLabel, tt, solved) {
   return secs;
 }
 
-/** Fly a finite burn forward without touching live state. */
-function simBurn(r0, v0, mu, mode, dur, m0) {
+/** Fly a finite burn forward without touching live state.
+ *
+ *  `mode` is one of the four steering references the engine can hold, or
+ *  'INRT' — an inertially-fixed heading, `inrt` radians, which is what a
+ *  Lambert solution needs: its ΔV is a VECTOR and is not in general along any
+ *  of the other four. The fixed direction is computed once, outside the loop,
+ *  exactly as `burnStep` computes `thrustDir()` once from a held attitude. */
+function simBurn(r0, v0, mu, mode, dur, m0, inrt) {
   let r = {...r0}, v = {...v0}, m = m0, t = 0;
   const mdot = curFlow();
   const fuel = S.craft.fuel;
+  const fixed = mode === 'INRT' ? { x: Math.cos(inrt), y: Math.sin(inrt) } : null;
   while (t < dur - 1e-9) {
     const dt = Math.min(0.5, dur - t);
     if (m0 - m >= fuel) break;                       // tanks dry
-    const dirv = mode === 'PRO'  ? V.unit(v)
+    const dirv = fixed ? fixed
+               : mode === 'PRO'  ? V.unit(v)
                : mode === 'RET'  ? V.mul(V.unit(v), -1)
                : mode === 'ROUT' ? V.unit(r) : V.mul(V.unit(r), -1);
     const aT = curThrust() / m;
@@ -3397,7 +3555,7 @@ function coastEncounter(r0, v0, soi0, t0, tk, maxT) {
       miss = Math.min(miss, d);
       if (d < tb.soi) {                       // arrived
         const ae = elements(rel, relv, tb.mu);
-        return { entered:true, periAlt:ae.rp - tb.R, ecc:ae.e, t, miss:d };
+        return { entered:true, periAlt:ae.rp - tb.R, ecc:ae.e, dir:ae.dir, t, miss:d };
       }
       const closing = -V.dot(V.unit(rel), relv);
       if (closing > 1e-9) dt = Math.min(dt, Math.max(5, (d - tb.soi) * 0.45 / closing));
@@ -3414,7 +3572,7 @@ function coastEncounter(r0, v0, soi0, t0, tk, maxT) {
           r = rel; v = V.sub(v, st.v); soi = c;
           if (c === tk) {
             const ae = elements(r, v, BODIES[c].mu);
-            return { entered:true, periAlt:ae.rp - BODIES[c].R, ecc:ae.e, t, miss:V.len(rel) };
+            return { entered:true, periAlt:ae.rp - BODIES[c].R, ecc:ae.e, dir:ae.dir, t, miss:V.len(rel) };
           }
         }
       }
@@ -3781,6 +3939,270 @@ function transferWindow(tk) {
   return { r1, r2, at, dv1, tof, phiReq, phiNow, wait };
 }
 
+/* ============================================================
+   THE LAMBERT PLANNER
+
+   `transferWindow` answers "when does the Hohmann window open", and it can
+   only answer it from a circular orbit, because a Hohmann between two circles
+   is what it computes. `PLAN XFER` is built on it and stays built on it: every
+   shipped mission's arrival is that code path's output, and none of them move.
+
+   This is the other tool. It starts from wherever the vehicle actually is —
+   eccentric, mid-arc, anywhere — and searches two free variables that the
+   Hohmann has none of: WHEN to leave, and HOW LONG to take. Lambert turns each
+   (departure, flight time) pair into a velocity, and the search is over the
+   resulting grid. That grid is the classic porkchop plot, and its shape is the
+   whole lesson: leave at the wrong moment and no amount of propellant helps;
+   leave at the right one and the trip is a third of the cost.
+
+   Measured, on the arc a Mars flyby leaves M-11 on (1.042 × 1.725 AU,
+   e = 0.247, period 594 d):
+
+       what the shipped path does   dep 2,115 + capture 6,839 = 8,954 m/s
+       what the porkchop finds      dep 1,383 + capture 1,475 = 2,858 m/s
+
+   The difference is not the burn. It is the ARRIVAL: the shipped return
+   crosses Earth's orbit at v∞ 10.7 km/s because it was never asked not to,
+   and the planned one arrives at 2.6 because the flight time was chosen.
+
+   Four stages, each of which can be read on its own:
+
+     1. SCAN      two-body, impulsive, centre to centre. Picks WHEN.
+     2. AIM       displace the target point perpendicular to the approach by
+                  the impact parameter, so the arrival periapsis is a number
+                  the player chose rather than whatever falls out.
+     3. REALISE   the ΔV is a vector, so the burn is flown at a fixed inertial
+                  heading, and a two-by-two Newton drives the residual between
+                  what the finite burn achieves and what Lambert asks for down
+                  to nothing.
+     4. VERIFY    `coastEncounter` integrates the result through the
+                  sphere-of-influence change, because a two-body solution is a
+                  guess about a patched-conic world. The aim is then corrected
+                  against what the integrator measured, not against the guess.
+   ============================================================ */
+
+/** ΔV to close an arrival hyperbola of this v∞ into an ellipse, m/s. */
+function captureCost(tb, vinf, rp, ra) {
+  const a = (rp + Math.max(ra, rp))/2;
+  return (Math.sqrt(vinf*vinf + 2*tb.mu/rp) - Math.sqrt(tb.mu*(2/rp - 1/a)))*1000;
+}
+
+/** The impact parameter that puts periapsis at `rp` for this approach speed:
+ *  how far off the body's centre to aim. `side` picks which side to pass. */
+function aimOffset(tb, vinfVec, rp, side) {
+  const vi = V.len(vinfVec);
+  if (!(vi > 1e-9)) return { x:0, y:0 };
+  const b = rp*Math.sqrt(1 + 2*tb.mu/(rp*vi*vi));
+  const u = V.unit(vinfVec);
+  return V.mul({ x:-u.y, y:u.x }, side*b);
+}
+
+/** Stage 1. The porkchop, coarse then downhill. */
+function lambertScan(tk, o) {
+  const b = soiBody(), mu = b.mu, tb = BODIES[tk];
+  const rp = tb.R + o.aimAlt, ra = tb.R + o.capAlt;
+  const budget = dvRemaining();
+  let evals = 0;
+  const at = (w, tof) => {
+    if (!(w >= 0) || !(tof > 0)) return null;
+    evals++;
+    const st = propagate(S.r, S.v, mu, w);
+    const ts = bodyStateIn(S.soi, tk, S.t + w + tof);
+    const lam = lambert(st.r, ts.r, tof, mu, {});
+    if (!lam || !lam.ok) return null;
+    const dvDep = V.len(V.sub(lam.v1, st.v))*1000;
+    const vinf  = V.len(V.sub(lam.v2, ts.v));
+    const dvCap = o.capture ? captureCost(tb, vinf, rp, ra) : 0;
+    // A departure the tank cannot pay for is not a cheaper answer, so it is
+    // scored as if the shortfall cost twice over. It is still RETURNED, so the
+    // page can say how far short it is rather than "no solution".
+    const over = Math.max(0, dvDep - budget);
+    return { w, tof, dvDep, vinf, dvCap, tot: dvDep + dvCap,
+             score: dvDep + dvCap + 2*over, lam, st, ts };
+  };
+  let best = null;
+  for (let i = 0; i <= o.NW; i++) {
+    const w = o.waitMax*i/o.NW;
+    for (let j = 0; j <= o.NT; j++) {
+      const c = at(w, o.tofMin + (o.tofMax - o.tofMin)*j/o.NT);
+      if (c && (!best || c.score < best.score)) best = c;
+    }
+  }
+  if (!best) return null;
+  // Downhill from the best cell. The grid is coarse on purpose — this is what
+  // makes it exact, and it costs a few hundred more evaluations.
+  let dw = o.waitMax/o.NW, dt = (o.tofMax - o.tofMin)/o.NT;
+  for (let k = 0; k < 80; k++) {
+    let moved = false;
+    for (const [a, c] of [[dw,0],[-dw,0],[0,dt],[0,-dt],[dw,dt],[-dw,-dt],[dw,-dt],[-dw,dt]]) {
+      const cand = at(best.w + a, best.tof + c);
+      if (cand && cand.score < best.score) { best = cand; moved = true; }
+    }
+    if (!moved) { dw /= 2; dt /= 2; }
+    if (dw < 0.5 && dt < 0.5) break;
+  }
+  best.evals = evals;
+  return best;
+}
+
+/** Stage 3. Fly the plan as a finite burn at a fixed inertial heading and
+ *  drive the residual — what Lambert wants minus what the burn achieved — to
+ *  zero on (duration, heading). */
+function lambertRealise(tk, w, tof, aimPt, dur0, th0) {
+  const mu = soiBody().mu, m0 = craftMass();
+  const tArr = S.t + w + tof;
+  const fly = (dur, th) => {
+    // The burn is centred on the departure epoch where there is room for it,
+    // and started NOW where there is not — you cannot light an engine in the
+    // past. Either way the arrival point is fixed, so the Newton below still
+    // has something to solve.
+    const lead = Math.max(0, w - dur/2);
+    if (!(dur > 0)) return null;
+    const st = propagate(S.r, S.v, mu, lead);
+    const o = simBurn(st.r, st.v, mu, 'INRT', dur, m0, th);
+    const t1 = S.t + lead + dur, rem = tArr - t1;
+    if (!(rem > 0)) return null;
+    const lam = lambert(o.r, aimPt, rem, mu, {});
+    if (!lam || !lam.ok) return null;
+    return { r:o.r, v:o.v, m:o.m, t1, lead, res: V.sub(lam.v1, o.v) };
+  };
+  let dur = dur0, th = th0, cur = fly(dur, th);
+  if (!cur) return null;
+  for (let i = 0; i < 40 && V.len(cur.res)*1000 > 1e-7; i++) {
+    const hD = Math.max(1e-4, dur*1e-5), hT = 1e-7;
+    const a = fly(dur + hD, th), c = fly(dur, th + hT);
+    if (!a || !c) break;
+    const J = [[(a.res.x - cur.res.x)/hD, (c.res.x - cur.res.x)/hT],
+               [(a.res.y - cur.res.y)/hD, (c.res.y - cur.res.y)/hT]];
+    const det = J[0][0]*J[1][1] - J[0][1]*J[1][0];
+    if (!isFinite(det) || Math.abs(det) < 1e-30) break;
+    let dd = -( J[1][1]*cur.res.x - J[0][1]*cur.res.y)/det;
+    let dh = -(-J[1][0]*cur.res.x + J[0][0]*cur.res.y)/det;
+    const lim = Math.max(1, dur*0.5);                 // damped: the first guess can be far out
+    if (Math.abs(dd) > lim) dd *= lim/Math.abs(dd);
+    if (Math.abs(dh) > 0.5) dh *= 0.5/Math.abs(dh);
+    const nx = fly(Math.max(0.05, dur + dd), th + dh);
+    if (!nx) break;
+    if (V.len(nx.res) > V.len(cur.res) && i > 3) break;
+    dur = Math.max(0.05, dur + dd); th += dh; cur = nx;
+  }
+  return { dur, th, resid: V.len(cur.res)*1000, ...cur };
+}
+
+/**
+ * The whole planner. Returns a plan, or null if this is not a transfer it can
+ * describe at all.
+ */
+function lambertPlan(tk, opts) {
+  const b = soiBody(), tb = BODIES[tk];
+  if (!tb || tb.parent !== S.soi) return null;
+  const o = Object.assign({ aimAlt: 300, capture: true }, opts || {});
+  if (o.capAlt == null) o.capAlt = o.aimAlt;
+  const e = el();
+  const P = isFinite(e.period) && e.period > 0 ? e.period : tb.period;
+  // One lap of the vehicle's own orbit sweeps every departure geometry there
+  // is; one of the target's sweeps every phase angle. Cover the longer.
+  if (o.waitMax == null) o.waitMax = Math.max(P, tb.period);
+  o.waitMax = Math.max(1, o.waitMax);
+  if (o.tofMin == null)  o.tofMin  = 0.05*tb.period;
+  if (o.tofMax == null)  o.tofMax  = 1.60*tb.period;
+  if (o.NW == null) {
+    // Departure resolution is set by the VEHICLE'S period: sampling coarser
+    // than that aliases the departure geometry away entirely, and a porkchop
+    // with the geometry aliased out of it is a picture of nothing. When that
+    // would cost more evaluations than a phone should spend in one keypress —
+    // a 92-minute parking orbit under a 27-day target asks for 38,000 samples
+    // — the SPAN is what gives, not the resolution. Searching four hours of
+    // departures properly beats searching a month badly, and the page says how
+    // far it looked.
+    const want = Math.round(o.waitMax/(P/90));
+    o.NW = Math.max(60, Math.min(300, want));
+    if (want > 300) o.waitMax = o.NW * (P/90);
+  }
+  if (o.NT == null) o.NT = 140;
+  const sc = lambertScan(tk, o);
+  if (!sc) return null;
+
+  const rpAim = tb.R + o.aimAlt;
+  // WHICH SIDE of the body to pass, and why it is not cosmetic.
+  //
+  // The impact parameter can be laid off either side of the target's centre.
+  // Both give the same periapsis altitude and cost the same propellant, and
+  // they differ only in which way round the body the arrival goes. On an
+  // airless body that is a preference. On one that ROTATES it is worth a
+  // kilometre a second: the air turns with the planet, so a retrograde
+  // arrival meets it at v + ωr and a prograde one at v − ωr. Measured on
+  // M-11's return — the same capture, the same mass, the same corridor — the
+  // retrograde side enters the air at 8.196 km/s against 7.25, and since
+  // Sutton-Graves heating goes as v³ that is 1.44× the peak rate. It is the
+  // difference between a corridor and no corridor at all.
+  //
+  // So when both sides land on the aim point, the one that turns with the
+  // body wins. When only one side reaches the aim at all, the aim wins — a
+  // prograde miss is still a miss.
+  const spin = (tb.rot || 0) < 0 ? -1 : 1;
+  let best = null;
+  const better = (cand, cur) => !cur ? true
+    : (cand.onAim && cur.onAim) ? (cand.dirOK !== cur.dirOK ? cand.dirOK : cand.score < cur.score)
+    : cand.score < cur.score;
+  for (const side of [1, -1]) {
+    // Stage 2, then 3, then 4 — and then stage 2 again against what stage 4
+    // measured. The two-body aim lands tens of kilometres off because the
+    // patched conic hands the vehicle over at the sphere-of-influence edge,
+    // not at infinity; a secant on the effective aim closes that.
+    let rpEff = rpAim, cand = null;
+    for (let pass = 0; pass < 12; pass++) {
+      let off = { x:0, y:0 }, seed = null;
+      for (let k = 0; k < 6; k++) {
+        const st = propagate(S.r, S.v, b.mu, sc.w);
+        const ts = bodyStateIn(S.soi, tk, S.t + sc.w + sc.tof);
+        const lam = lambert(st.r, V.add(ts.r, off), sc.tof, b.mu, {});
+        if (!lam || !lam.ok) { seed = null; break; }
+        off = aimOffset(tb, V.sub(lam.v2, ts.v), rpEff, side);
+        seed = { lam, st, ts, off, aimPt: V.add(ts.r, off) };
+      }
+      if (!seed) break;
+      const dv0 = V.sub(seed.lam.v1, seed.st.v);
+      const rz = lambertRealise(tk, sc.w, sc.tof, seed.aimPt,
+                                burnTimeFor(V.len(dv0)*1000), Math.atan2(dv0.y, dv0.x));
+      if (!rz) break;
+      const enc = coastEncounter(rz.r, rz.v, S.soi, rz.t1, tk, sc.tof*2.5);
+      const q = enc.entered ? enc.periAlt : enc.miss - tb.R;
+      const trial = { side, sc, seed, enc, q, ...rz,
+                      dirOK: !enc.entered || enc.dir === spin,
+                      onAim: !!(enc.entered && q > 0 && Math.abs(q - o.aimAlt) < 100),
+                      score: enc.entered && q > 0 ? Math.abs(q - o.aimAlt) : 1e9 + Math.abs(q) };
+      // KEEP THE BEST PASS, not the last one. The correction is a secant on a
+      // patched-conic arrival and it does not always walk downhill: measured on
+      // an Earth-to-Mars aim, pass 5 lands 1,008 km off and pass 12 lands 3,561
+      // km off, so a loop that returns whatever it finished on is worse than
+      // one that stops early.
+      if (!cand || trial.score < cand.score) cand = trial;
+      if (!enc.entered || Math.abs(q - o.aimAlt) < 0.5) break;
+      const next = rpEff + (o.aimAlt - q);
+      if (!(next > tb.R*0.2)) break;
+      rpEff = next;
+    }
+    if (cand && better(cand, best)) best = cand;
+  }
+  if (!best) return null;
+  // Rocket equation on the two burns the plan implies, from the mass the
+  // vehicle has now. The departure is flown, so its propellant is real; the
+  // capture is a quote, so its is an estimate of the same quality as the quote.
+  const ve = curIsp()*G0;
+  const massAfter = craftMass()*Math.exp(-(best.sc.dvDep + best.sc.dvCap)/ve);
+  return {
+    massAfter,
+    target: tk, wait: best.sc.w, tof: best.sc.tof, tArr: S.t + best.sc.w + best.sc.tof,
+    dvDep: best.sc.dvDep, vinf: best.sc.vinf, dvCap: best.sc.dvCap, total: best.sc.tot,
+    dur: best.dur, heading: best.th, resid: best.resid, side: best.side,
+    entered: best.enc.entered, periAlt: best.q, ecc: best.enc.ecc,
+    arrDir: best.enc.dir, withSpin: !!best.dirOK,
+    tEnc: best.enc.t, miss: best.enc.miss, aimAlt: o.aimAlt, capAlt: o.capAlt,
+    evals: best.sc.evals,
+  };
+}
+
 function cmdPlan(A) {
   // The solver IS the flight computer. No avionics, no solutions.
   if (!sysOn('AVIO')) return say('AVIONICS OFF — the flight computer is not running, so there is nothing to solve manoeuvres with. Bring AVIONICS up on the SYS page.', 'err');
@@ -3940,6 +4362,72 @@ function cmdPlan(A) {
     return;
   }
 
+  if (sub === 'LAMBERT' || sub === 'LAM' || sub === 'ARC') {
+    const tk = A[1];
+    if (!tk || !BODIES[tk]) return say('Usage: PLAN LAMBERT <BODY> [arrival periapsis km] [depart within, days]   e.g. PLAN LAMBERT EARTH 300 30', 'err');
+    if (BODIES[tk].parent !== S.soi)
+      return say(`${tk} does not orbit ${b.name}, so there is no transfer to it from here. Leave this sphere of influence first (PLAN ESC), or aim at something that does.`, 'err');
+    if (tk === S.soi) return say('You are already there.', 'err');
+    const aim = parseFloat(A[2]), within = parseFloat(A[3]);
+    const aimAlt = isFinite(aim) ? aim : 300;
+    const capAlt = aimAlt;                       // the capture reference is circular there
+    S.planName = 'ARC TRANSFER TO ' + tk;
+    head('MANEUVER · ARC TRANSFER TO ' + tk);
+    row('FROM', `${fmtDist(e.rp - b.R)} × ${fmtDist(e.ra - b.R)}  e ${e.e.toFixed(4)}`);
+    row('AIM POINT', fmtDist(aimAlt) + ` periapsis at ${tk}`, 'key');
+    if (isFinite(within) && within > 0) row('DEPART WITHIN', within.toFixed(0) + ' days', 'key');
+    say('Searching departure time against flight time…', 'dim');
+    const P = lambertPlan(tk, { aimAlt, capAlt,
+                               waitMax: isFinite(within) && within > 0 ? within*86400 : undefined });
+    S.lambert = null;
+    if (!P) return say(`No transfer to ${tk} was found from this orbit. Nothing in the searched span of departure times and flight times joins the two.`, 'err');
+    S.lambert = P;
+    row('DEPART IN', fmtT(P.wait), 'key');
+    row('FLIGHT TIME', fmtT(P.tof));
+    row('ARRIVES', fmtMET(P.tArr) + ' MET');
+    row('ΔV REQUIRED', fmtDV(P.dvDep) + '  inertial ' + (normAngle(P.heading)*180/Math.PI).toFixed(2) + '°',
+        P.dvDep <= dvRemaining() ? 'key' : 'bad');
+    row('BURN TIME', P.dur.toFixed(2) + ' s at full throttle');
+    row('ARRIVAL SPEED', fmtVel(P.vinf) + '  v∞');
+    if (P.entered && P.periAlt > 0) {
+      row('ARRIVAL PERI', fmtDist(P.periAlt) + ` over ${tk}`, Math.abs(P.periAlt - aimAlt) < 50 ? 'ok' : 'go');
+      if (BODIES[tk].rot) row('GOES ROUND', P.withSpin ? 'with the rotation' : 'AGAINST the rotation',
+                              P.withSpin ? 'ok' : 'bad');
+      row('CAPTURE COSTS', fmtDV(P.dvCap) + (capAlt === aimAlt ? '  to circular there' : `  into ${fmtDist(aimAlt)} × ${fmtDist(capAlt)}`),
+          P.dvDep + P.dvCap <= dvRemaining() ? 'ok' : 'bad');
+      row('BOTH BURNS', fmtDV(P.dvDep + P.dvCap) + `  of ${fmtDV(dvRemaining())} aboard`,
+          P.dvDep + P.dvCap <= dvRemaining() ? 'ok' : 'bad');
+      // What the vehicle WEIGHS when the capture is over. On a flight that has
+      // to come down through air this is not a footnote: the engine is the
+      // only way a spacecraft sheds mass, so a cheap transfer is a heavy
+      // arrival, and an airframe has a mass it can land at.
+      if (isFinite(P.massAfter)) {
+        const lim = S.craft.entryMax;
+        row('MASS AFTER', P.massAfter.toFixed(0) + ' kg' + (lim ? `  of ${lim.toFixed(0)} it can land at` : ''),
+            !lim ? '' : P.massAfter <= lim ? 'ok' : 'bad');
+        if (lim && P.massAfter > lim)
+          say(`This arrives ${(P.massAfter - lim).toFixed(0)} kg too heavy to come down. The cheapest transfer is not the one you can land: `
+            + `the engine is the only way this ship sheds mass, so leaving EARLIER and paying more propellant is what makes the entry survivable. `
+            + `Try PLAN LAMBERT ${tk} ${Math.round(aimAlt)} <days> with a short window.`, 'warn');
+      }
+    } else {
+      row('CLOSEST', fmtDist(Math.abs(P.miss)) + ` — no encounter`, 'bad');
+    }
+    if (P.dvDep > dvRemaining()) say('INSUFFICIENT PROPELLANT for this departure.', 'err');
+    say('');
+    S.solution = { name: S.planName, dir: 'INRT', secs: P.dur, node: 'T',
+                   when: S.t + P.wait, nodeLabel: `T+${P.wait.toFixed(0)} s`,
+                   inrt: P.heading, dv: P.dvDep, prop: P.dur * curFlow(),
+                   detail: P.entered ? `arrive ${fmtDist(P.periAlt)} over ${tk} at v∞ ${fmtVel(P.vinf)}`
+                                     : `closest approach ${fmtDist(Math.abs(P.miss))}` };
+    say(`  →  BURN INRT ${(normAngle(P.heading)*180/Math.PI).toFixed(4)} ${P.dur.toFixed(3)} AT T+${P.wait.toFixed(2)}`, 'ok');
+    say(`A Lambert ΔV is a VECTOR, so this one is flown at a fixed inertial heading rather than along prograde. The console holds the attitude from the moment it is armed.`, 'dim');
+    say(`Searched ${P.evals} trajectories. WHEN you leave is the manoeuvre: the same burn a month early arrives thousands of metres per second faster and the capture is what pays for it.`, 'dim');
+    if (P.entered && Math.abs(P.periAlt - aimAlt) > 50)
+      say(`The aim came out ${fmtDist(Math.abs(P.periAlt - aimAlt))} off ${fmtDist(aimAlt)}. Fly it and trim — PLAN TRIM ${tk} once you are under way.`, 'warn');
+    return;
+  }
+
   if (sub === 'TRIM' || sub === 'MCC') {
     const tk = A[1];
     if (!tk || !BODIES[tk]) return say('Usage: PLAN TRIM <BODY> [aim altitude, km]   e.g. PLAN TRIM EARTH', 'err');
@@ -4040,6 +4528,9 @@ function cmdPlan(A) {
   say('PLAN PERI <km>       raise/lower periapsis (burns at apoapsis)', 'out');
   say('PLAN ESC             escape the current sphere of influence', 'out');
   say('PLAN XFER <BODY>     Hohmann transfer + launch window', 'out');
+  say('                     — for a CIRCULAR orbit, and it says so if yours is not', 'dim');
+  say('PLAN LAMBERT <BODY> [aim km]', 'out');
+  say('                     — from whatever arc you are on, to a periapsis you choose', 'dim');
   say('PLAN TRIM <BODY>     midcourse trim of the approach you are on', 'out');
   say('PLAN RDV             station rendezvous phasing', 'out');
   say('Each solution returns an executable BURN line.', 'dim');
@@ -4466,6 +4957,10 @@ function rig(o) {
                            // for it to matter, and the model says so by
                            // returning zero density above the interface.
                            cda: 12, qMax: Infinity,
+                           // Entry hardware that belongs to the airframe. Null
+                           // on every vehicle that does not declare it, which
+                           // is the reference canopies and no advisory.
+                           chutes: null, entryMax: null,
                            thrustSL: null, ispSL: null,
                            stages: null, stageIx: null, stageName: null, payload: 0 }, o);
   // Capacity and contents are the same number for every vehicle that launches
@@ -4802,15 +5297,32 @@ const MISSIONS = [
     'Cold and dark at {Cape Auriga} with a {nuclear thermal} stage under the capsule and {600 kg} of hydrogen aboard — {964 m/s}, and not a metre more. That is deliberate. You are not launching a Mars ship; you are launching an empty one.',
     'Depot {CERES} at {400 km} holds {32,000 kg} and does not refill itself. Dock, tie the bus, and pump. What you take is gone, and what you leave behind is what a later flight will find.',
     'Then: escape Earth, throw the aphelion out to {1.52 AU}, and fly {259 days} to a Mars flyby. No capture — you pass, you look, and Mars bends your orbit for free.',
-    'Coming home is the hard half. {PLAN XFER EARTH} finds the return, but a transfer solver stops at the edge of a sphere of influence and cannot see the {Moon} sitting inside Earth\'s. Fly {PLAN TRIM EARTH} while you are still months out — the same correction costs a hundredth out there of what it costs on the doorstep.',
-    'An interplanetary arrival is {11 km/s} at the interface and no heat shield aboard survives that, so this flight does not come down. You arrive on a {hyperbola} and you stop: one hard {retrograde burn at periapsis}, enough to close it into an ellipse. Circularising out where you arrive costs more than the tank holds.',
-    'The mission ends {in orbit}. Bringing this crew through the atmosphere is a later flight and a harder problem than it looks — the arc a flyby leaves you on is nothing like the circular one the transfer solver assumes.',
-    'Three crew, {three and a half to four years}. The {regenerative} life support recycles the air and runs on the bus — the oxygen reserve is only there for when the power is not.'],
+    'Coming home is the whole second half, and {PLAN XFER EARTH} is the wrong tool for it. That solver computes a Hohmann between two {circles}, and a flyby leaves you on {1.04 × 1.73 AU} — an arc, not a circle. Flown, it crosses Earth\'s orbit at {10.7 km/s} and the capture alone is {6,839 m/s}.',
+    'Use {PLAN LAMBERT EARTH 300} instead. It searches when to leave against how long to take, from the arc you are actually on, and aims a periapsis you choose. The cheapest answer it finds waits {476 days} and costs {1,383 m/s} — a third of the propellant and a v∞ of {2.6 km/s} instead of 10.7.',
+    'And you cannot fly it. Read the {MASS AFTER} line: the engine is the only way a spacecraft sheds mass, so the cheap transfer is the {heavy arrival}, and this ship comes home at {10,212 kg} against an airframe that can land {7,600}. Ask for a short departure window — {PLAN LAMBERT EARTH 300 30} — and you leave at once, pay {3,529 m/s}, get home {a year earlier} and arrive light enough to come down.',
+    'Which side you pass Earth on is not cosmetic either: the air turns with the planet, so an arrival that goes {against} the rotation meets it at {8.20 km/s} instead of 7.25, and cubed that is {1.44×} the heating. The planner picks the side that turns with it and the page says which.',
+    'Then stop properly — one hard {retrograde burn at periapsis} straight into a {low circular orbit}, about {4.2 km/s} — and it is M-10\'s entry from there. The corridor on the {ENTRY} page is this airframe\'s own, {−40 to +80 km}. {DROGUE} below 25 km, {MAINS} below 6, and under 10 m/s into the water.',
+    'Three crew, {a little over three years}. The {regenerative} life support recycles the air and runs on the bus — the oxygen reserve is only there for when the power is not.'],
   hint:'BATT → PWR UP → LAUNCH → COUNT GO', next:13,
   sys: [],
   setup(){ rig({name:'ARES-2', dry:5200, fuel:600, fuelMax:32000,
                 thrust:250, isp:900, rcs:260, rcsIsp:220,
-                crew:3, o2:2000, cda:26, stages: ASCENT_STACK()});
+                crew:3, o2:2000,
+                // ENTRY HARDWARE, sized for THIS airframe at the mass it comes
+                // home at — 7,370 kg, measured, against M-10's 5,442 kg capsule.
+                // M-10's rule is the rule: the shield IS the drag area and a
+                // ballistic coefficient near 190 kg/m² is what keeps the peak
+                // heating rate inside the ablator's limit, so 7,370/190 = 39 m².
+                // The canopies scale the same way, by the mass they have to
+                // hold: 110 → 150 m² and 1,100 → 1,500 m². Measured with the
+                // reference set instead, this ship tears the drogue off at
+                // 4.33 kPa against a 3.00 kPa limit and hits the sea at 68 m/s.
+                // None of this is reachable before the entry — the launcher
+                // stages carry their own drag area and a canopy that is stowed
+                // adds nothing — so every number in this flight up to the
+                // interface is bit-for-bit what it was.
+                cda:39, chutes: { DROGUE: 150, MAIN: 1500 }, entryMax: 7600,
+                stages: ASCENT_STACK()});
     setPad('EARTH', 0, { count: 600, program: [[0,90],[2,84],[10,58],[40,22],[130,7]] });
     S.objects = [ makeStation('EARTH', 400, 25) ];
     // A depot is a quantity, not a tap. It is sized so the round trip closes
@@ -4848,26 +5360,32 @@ const MISSIONS = [
     { name:'MARS FLYBY', text:'Cross into Mars\' sphere of influence and come out the other side. No capture burn — you are not staying.',
       hint:'WARP 1000000 and wait out the 259 days',
       check:(s)=> s.flags.marsSOI && s.soi === 'SUN' },
-    { name:'RETURN', text:'Solve the transfer home and fly it. Trim the approach long before you get there.',
-      hint:'PLAN XFER EARTH → then PLAN TRIM EARTH mid-cruise',
+    { name:'RETURN', text:'Plan the way home from the arc you are on, not from a circle you are not. PLAN LAMBERT, with a short departure window — the cheapest transfer arrives too heavy to land.',
+      hint:'PLAN LAMBERT EARTH 300 30 → fly the BURN INRT line it quotes',
       check:(s)=> s.soi === 'EARTH' },
-    // The last phase, and the mission ends here — in orbit, not in the water.
+    // Capture into a LOW orbit, not an ellipse. The old ending stopped at an
+    // ellipse because it could not afford anything better: a return aimed by
+    // `transferWindow` arrives at v∞ 10.7 km/s with periapsis 6,110 km out, and
+    // the capture there is 6,839 m/s of the 8,274 aboard. Planned properly the
+    // same return arrives at v∞ 4.9 and 300 km, and stopping dead costs 4,249
+    // — which leaves a ship that can go on and land, rather than one that has
+    // to sit in orbit and wait for a rescue that was never written.
     //
-    // Coming down from an interplanetary return is a separate problem and an
-    // honest one: the ship arrives far faster than the shield M-10 carries, and
-    // the trajectory that gets it home is planned by `transferWindow`, which
-    // assumes a circular departure orbit and cannot describe the eccentric arc
-    // a flyby leaves you on. Rather than pretend, the crew stop in Earth orbit
-    // and a later flight brings them down.
-    //
-    // The hint matters. PLAN TRIM is a MIDCOURSE tool — inside Earth's sphere
-    // of influence, on a hyperbola, there is no apoapsis for it or for PLAN
-    // PERI to work at, and circularising at an 8,000 km periapsis costs 3.7
-    // km/s and strands the ship. The move is a retrograde burn AT PERIAPSIS,
-    // sized to leave an ellipse rather than a circle.
-    { name:'EARTH CAPTURE', text:'You are falling past your own planet on a hyperbola. Burn retrograde at periapsis — hard — and let it close into an ellipse. Circularising out there costs more than you have.',
-      hint:'BURN RET <seconds> AT PE, sized to leave an ellipse under 20,000 km',
-      check:(s,d)=> s.soi === 'EARTH' && d.e.e < 1 && d.perAlt > 100 && d.apoAlt < 20000 },
+    // The apoapsis bound is not decoration. Entry from a 20,000 km ellipse is
+    // 9.8 km/s at the interface against 7.85 from a low orbit, and cubed that
+    // is more than twice the heating rate. Stopping properly is the manoeuvre.
+    { name:'EARTH CAPTURE', text:'You are falling past your own planet on a hyperbola. One hard retrograde burn at periapsis, straight into a low circular orbit — stopping half-way leaves you entering at 9.8 km/s instead of 7.9.',
+      hint:'BURN RET <seconds> AT PE, sized to circularise — about 4.2 km/s',
+      check:(s,d)=> s.soi === 'EARTH' && d.e.e < 1 && d.perAlt > 140 && d.apoAlt < 2000 },
+    { name:'DEORBIT', text:'Put periapsis inside the corridor on the ENTRY page. The band is this airframe\'s own — it is a heavier ship than M-10 and it was measured as one.',
+      hint:'PLAN PERI <km> inside the band → ENTRY to check it',
+      check:(s,d)=> s.soi === 'EARTH' && d.perAlt >= MARS_BAND[0] && d.perAlt <= MARS_BAND[1] },
+    { name:'ENTRY', text:'Fly it down. Hold the shield forward and watch the rate against its limit.',
+      hint:'ENTRY page · shield budget and heating rate',
+      check:(s,d)=> d.alt < 25 && s.soi === 'EARTH' && !s.shield.gone },
+    { name:'SPLASHDOWN', text:'Drogue below 25 km, mains below 6 km, and under 10 m/s into the water. Three crew, and a little over three years since the pad.',
+      hint:'DROGUE → MAINS',
+      check:(s)=> s.status === 'landed' },
   ]
 },
 {
@@ -5024,7 +5542,7 @@ function loadMission(id) {
   S.power.tie = 0;
   S.aligning = false; S.warnedProx = false;
   S.completed = false; S.pauseAfterBurn = false;
-  S.solution = null; S.burnSel = { dir:'PRO', at:'AP', dur:0 };
+  S.solution = null; S.lambert = null; S.burnSel = { dir:'PRO', at:'AP', dur:0 };
   S.landingAllowed = false; S.thermLimit = 800; S.depot = null;
   S.therm.hull = 20; S.ledger = { dvUsed:0, burns:0 };
   S.loads = { HEAT:true, SCI:false, COMM:true };
@@ -5530,13 +6048,13 @@ function armSolution() {
   if (!sol) return say('NO SOLUTION COMPUTED', 'warn');
   if (sol.secs == null || !isFinite(sol.secs) || sol.secs <= 0) return say('SOLUTION NOT EXECUTABLE', 'err');
   if (sol.node === 'PE' || sol.node === 'AP') {
-    S.sched = { dir: sol.dir, dur: sol.secs, at: sol.node };
+    S.sched = { dir: sol.dir, dur: sol.secs, at: sol.node, inrt: sol.inrt || 0 };
     say(`BURN ARMED · ${DIRNAME[sol.dir]} ${sol.secs.toFixed(1)} s at ${sol.node === 'PE' ? 'periapsis' : 'apoapsis'}`, 'ok');
   } else if (sol.node === 'T') {
-    S.sched = { dir: sol.dir, dur: sol.secs, at: 'T', when: sol.when };
+    S.sched = { dir: sol.dir, dur: sol.secs, at: 'T', when: sol.when, inrt: sol.inrt || 0 };
     say(`BURN ARMED · ${DIRNAME[sol.dir]} ${sol.secs.toFixed(1)} s at T+${(sol.when - S.t).toFixed(0)} s`, 'ok');
   } else {
-    startBurn(sol.dir, sol.secs);
+    startBurn(sol.dir, sol.secs, false, sol.inrt || 0);
   }
   S.burnSel.dir = sol.dir; S.burnSel.dur = sol.secs;
   if (sol.node) S.burnSel.at = sol.node;
@@ -5607,10 +6125,54 @@ PLAN: Object.assign(one('MANEUVER'), { sub: () => 'SOLVER', build: () => [
         const v = eatScratch().toUpperCase();
         if (!v) return say('ENTER A BODY NAME IN THE SCRATCHPAD FIRST', 'warn');
         cmdPlan(['TRIM', v]); })) },
-  { l: F('ΔV remaining', dv(), 'ok'),
-    r: S.solution ? F('Last solution', 'REVIEW>', 'sel', 'PLANR') : F('Reference', soiBody().name) },
+  // The arc transfer is a LINK, not a thirteenth function key — the same rule
+  // LAUNCH, ENTRY and SURFACE are held to. It sits next to TRANSFER> because
+  // the two answer the same question from different orbits, and the page says
+  // which is which.
+  { l: NAV('<ARC TRANSFER', 'LAMB'),
+    r: S.solution ? F('Last solution', 'REVIEW>', 'sel', 'PLANR') : F('ΔV remaining', dv(), 'ok') },
   menuRow('BURN>', 'BURN'),
 ] }),
+
+/* The Lambert planner's own page: what the last search found, and the two
+   numbers that decide whether it can be flown — what both burns cost, and what
+   the vehicle weighs when they are over. */
+LAMB: Object.assign(one('ARC TRANSFER'), {
+  sub: () => S.lambert ? S.lambert.target : 'LAMBERT',
+  build: () => {
+    const P = S.lambert;
+    if (!P) return [
+      { full: F('', 'No arc transfer solved. Type a body into the scratchpad and select SOLVE, or use PLAN LAMBERT <BODY> [aim km] [depart within, days].', 'body'), wrap: true },
+      { full: F('', 'PLAN XFER is a Hohmann between two circles and says so when your orbit is not one. This is the other tool: it starts from the arc you are actually on, searches when to leave against how long to take, and aims a periapsis you choose.', 'body'), wrap: true },
+      {}, {},
+      { l: F('Reference', soiBody().name), r: F('ΔV remaining', dv(), 'ok') },
+      { l: NAV('<PLAN', 'PLAN'),
+        r: F('body into scratchpad', 'SOLVE>', 'sel', () => {
+          const v = eatScratch().toUpperCase();
+          if (!v) return say('ENTER A BODY NAME IN THE SCRATCHPAD FIRST', 'warn');
+          cmdPlan(['LAMBERT', v]); }) },
+    ];
+    const tb = BODIES[P.target];
+    const both = P.dvDep + P.dvCap;
+    const lim = S.craft.entryMax;
+    return [
+      { l: F('Depart in', fmtT(P.wait), 'key'), r: F('Flight time', fmtT(P.tof)) },
+      { l: F('Departure ΔV', fmtDV(P.dvDep), P.dvDep <= dvRemaining() ? 'ok' : 'bad'),
+        r: F('Heading', (normAngle(P.heading)*180/Math.PI).toFixed(2) + '°  inertial') },
+      { l: F('Arrival v∞', fmtVel(P.vinf)),
+        r: F('Arrival peri', P.entered ? fmtDist(P.periAlt) : '— no encounter',
+             P.entered ? 'ok' : 'bad') },
+      { l: F('Capture costs', fmtDV(P.dvCap)),
+        r: F('Both burns', fmtDVPair(both, dvRemaining()), both <= dvRemaining() ? 'ok' : 'bad') },
+      { l: F('Mass after', isFinite(P.massAfter) ? P.massAfter.toFixed(0) + ' kg' : '—',
+             !lim ? '' : P.massAfter <= lim ? 'ok' : 'bad'),
+        r: tb && tb.rot ? F('Goes round', P.withSpin ? 'WITH SPIN' : 'AGAINST SPIN', P.withSpin ? 'ok' : 'bad')
+                        : F('Can land at', lim ? lim.toFixed(0) + ' kg' : '—') },
+      { l: NAV('<PLAN', 'PLAN'),
+        r: S.solution && S.solution.dir === 'INRT' ? F('', 'REVIEW>', 'sel', 'PLANR')
+                                                   : F('Reference', soiBody().name) },
+    ];
+  } }),
 
 PLANR: Object.assign(one('SOLUTION'), {
   sub: () => S.solution ? S.solution.name : '',
@@ -6390,6 +6952,8 @@ const HELP_PAGES = [
     ['BURN', 'BURN <DIR> <SEC> [AT PE|AP|T+n]'],
     ['WARP', 'WARP <rate>   or the rail arrows'],
     ['PLAN', 'PLAN CIRC AP · APO <km> · XFER <BODY>'],
+    ['PLAN LAMBERT', 'PLAN LAMBERT <BODY> [aim km] [depart within, days] — a transfer from whatever arc you are on, to a periapsis you choose. XFER is the one for a circular orbit.'],
+    ['BURN INRT', 'BURN INRT <heading°> <seconds> — thrust along a fixed inertial heading, which is how a Lambert ΔV is flown.'],
     ['TRANS', 'TRANS TGT|AWAY|PORT|STBD <m/s>'],
     ['DOCK', 'DOCK AUTO|RETRACT|LATCH|RESEAT|UNDOCK'],
     ['SYS', 'SYS · START <sys> · STOP <sys> · PWR UP'],

@@ -12,7 +12,7 @@ constraints and open questions.
 | [04](04-cargo-and-return.md) | Cargo run: launch, deliver, come home | **Done** | 01, 02, 03 |
 | [05](05-mars-round-trip.md) | Mars round trip: refuel, go, get home | **Done** (ends in Earth orbit) | — |
 | [06](06-lunar-landing.md) | Lunar landing from a mothership | **Done** | 04 |
-| [07](07-lambert-and-coming-down.md) | Lambert solver, and bringing an interplanetary return down | In progress | 05 |
+| [07](07-lambert-and-coming-down.md) | Lambert solver, and bringing an interplanetary return down | **Done** | 05 |
 
 Decisions taken: attitude is built inside item 01 scoped to docking's needs and
 extended when launch needs it; cold start and launch are separate items.

@@ -1,6 +1,6 @@
 # 07 — A Lambert solver, and bringing an interplanetary return down
 
-**Status:** Not started · **Depends on:** 05 (Mars round trip), 04 (entry, chutes,
+**Status:** Done · **Depends on:** 05 (Mars round trip), 04 (entry, chutes,
 splashdown), 06 (the capture-then-enter pattern)
 
 This item exists because item 05 stopped short and said so in the mission brief.
@@ -147,3 +147,108 @@ Then `./tests/run.sh` — all fourteen suites, plus whatever this item adds.
    does the physics; what is missing is the planning and the readout that make it
    flyable rather than a lucky accident. Do not resize CERES to paper over a
    shortfall.
+
+
+---
+
+## What shipped, and what it measured
+
+M-11 now flies **dark pad → launch → CERES → refuel → Mars flyby → home → the
+water**: twelve phases, **MET 1110:14:04:18 = 3.04 years**.
+
+### The solver
+
+A universal-variable Lambert on the same Stumpff `C(z)`/`S(z)` as `keplerStep`.
+The unknown is `z` and flight time is monotone in it wherever `y(z) > 0`, so it
+is solved by **bisection rather than Newton** — deliberately, because Newton is
+exactly what diverged on the Mars hyperbola that item 05 had to fix.
+
+Tested as mathematics before it was tested as a mission, 22 round trips across
+LEO circular, e = 0.70, a lunar arc, heliocentric cruise, the e = 0.247 flyby arc
+and a hyperbola: worst velocity residual **1.03e-7 m/s**, worst time-of-flight
+residual **1.49e-7 s**, worst forward-check miss **6.9e-7 km**.
+
+`PLAN XFER`'s path is untouched, and that is verified rather than asserted:
+`transferWindow`, `targetEncounter`, `solveBurn` and `teiSolve` are byte-identical
+to the previous commit, and `coastEncounter` differs by one added field that no
+existing caller reads. Both pinned arrivals are unmoved — lunar **708 × 823 km**,
+Mars **229 × 1080 km at MET 344:08:49:17**.
+
+### The scoreboard
+
+| | shipped return | Lambert return |
+|---|---|---|
+| Departure | 2,115 m/s | 3,529 m/s |
+| Arrival v∞ | 10.679 km/s | 4.803 km/s |
+| Capture | 6,839 m/s | 4,211 m/s |
+| **Total** | **8,954 m/s** | **7,740 m/s** |
+| Duration | 4.17 years | **3.04 years** |
+
+Entry interface 7.860 km/s inertial, 7.386 air-relative; peak heating
+**337 kW/m² = 0.80×** the 420 limit; **32.8%** of the shield left; splashdown
+**8.32 m/s** against a 10 m/s limit.
+
+### Propellant was never the blocker — so aerobraking was not built
+
+The owner sanctioned aerobraking as the fix *if the budget did not close*. It
+closes, so it was not built. The reason is worth keeping:
+
+The cheapest transfer Lambert finds costs **1,383 m/s** departure and 1,475 m/s
+capture — v∞ 2.62 km/s against 10.68. It is also **unflyable**. The engine is the
+only way a spacecraft sheds mass, so the cheap transfer is the *heavy* arrival:
+it comes home at **10,212 kg** against an airframe that can land **7,600**. At
+that mass every periapsis from 10 to 100 km exceeds the rate limit and 110–120 km
+spends the whole 90 MJ/m² budget. **There is no corridor.**
+
+Aerobraking would not have helped: the shallow end already spends the entire
+shield budget, so more passes spend more shield, not less. Measured, not assumed.
+
+The fix is a knob on the planner instead. `PLAN LAMBERT EARTH 300 **30**`
+constrains the departure window: leave at once, pay 3,529 m/s instead of 1,383,
+arrive at **7,339 kg**, and get home **705 days sooner**. That trade — cheap
+against flyable — is now the lesson of M-11's second half.
+
+### Which way round the planet you arrive is worth 1.44× the heating rate
+
+The impact parameter can be laid off either side of the target's centre: same
+periapsis, same propellant, opposite directions round the body. The air turns
+with the planet, so a retrograde arrival meets it at `v + ωr`.
+
+Verified independently of the mission, same orbit and mass with only the
+direction reversed: **7.436 km/s air-relative prograde against 8.380
+retrograde** from an identical 7.908 km/s inertial. Cubed, that is **1.43×** the
+heating rate. It was the difference between having a corridor and not having one.
+`coastEncounter` now reports the arrival's sense and the planner prefers the side
+that turns with the body.
+
+### Per-vehicle entry hardware
+
+ARES-2 carries its own: `cda: 39`, `chutes: { DROGUE: 150, MAIN: 1500 }`,
+`entryMax: 7600`. Sized by M-10's own stated rule (β ≈ 190) and by mass ratio.
+With the reference canopies the drogue streams at **4.33 kPa against a 3.00 kPa
+tear limit** and the capsule hits the sea at **68 m/s** — ARES-2's dry mass plus
+RCS alone exceeds M-12's entire landing mass. `S.craft.chutes` and
+`S.craft.entryMax` default to `null`, so M-10, M-12 and the M-12 lander fly the
+reference set unchanged.
+
+### Found and not fixed
+
+- **`rollSeal()` uses `Math.random()`** (pre-existing; three occurrences, all
+  older than this item). Measured on an unchanged tree, M-12's splashdown lands
+  on MET 010:14:43:19 or :10 depending on whether the seal re-seats. Any
+  "byte-identical" claim about a suite that docks is luck, not proof. The pinned
+  arrivals are safe because M-04/M-05/M-08 never dock. Wants a seeded RNG.
+- **`targetEncounter`'s aim ladder is mass-fragile** — 32,000 kg picks the
+  k = 1.12 rung and 24,000 kg picks k = 1.30, and the second misses. Not on any
+  shipped path; left alone because `PLAN XFER` stays frozen.
+- **`PLAN LAMBERT`'s aim across an interplanetary SOI patch** is exact to the
+  Moon, Venus and Earth but lands 239 km against 300 asked at Mars. The readout
+  warns and points at `PLAN TRIM`. Honest, not solved.
+
+### Fixed in review
+
+- The `Both burns` field shipped as `3.929 km/s / 5.214 km/s` and **ran off the
+  side of a 375 px screen** — measured in Chromium, not guessed. Now
+  `3.929 / 5.214 km/s` via `fmtDVPair`, which prints the shared unit once.
+- `layout.test.js` had not been extended to the new page, which is why nothing
+  caught it. It now walks ARC TRANSFER in both its empty and solved states.
